@@ -1,7 +1,7 @@
-wandb: Creating sweep from: food-only-sweep.yaml
-wandb: Creating sweep with ID: geysk990
-wandb: View sweep at: https://wandb.ai/mfr-ppgr-2025/tft-ppgr-2025/sweeps/geysk990
-wandb: Run sweep agent with: wandb agent mfr-ppgr-2025/tft-ppgr-2025/geysk990
+# wandb: Creating sweep from: food-only-sweep.yaml
+# wandb: Creating sweep with ID: geysk990
+# wandb: View sweep at: https://wandb.ai/mfr-ppgr-2025/tft-ppgr-2025/sweeps/geysk990
+# wandb: Run sweep agent with: wandb agent mfr-ppgr-2025/tft-ppgr-2025/geysk990
 program: run.py  # or whatever your main script filename is
 method: bayes      # you can also use "grid" or "random"
 metric:
@@ -13,7 +13,7 @@ parameters:
     min: 0.0001
     max: 0.01
   hidden_size:
-    values: [8, 16, 32, 64, 128, 256]
+    values: [8, 32, 64, 128, 256, 512]
   attention_head_size:
     values: [1, 2, 4]
   dropout:
@@ -21,8 +21,8 @@ parameters:
     min: 0.0
     max: 0.3
   hidden_continuous_size:
-    values: [8, 16, 32, 64, 128, 256]
+    values: [8, 16, 32, 64, 128, 256, 512]
   max_epochs:
     value: 50
   batch_size:
-    values: [64, 128, 256]
+    values: [128, 256, 512]

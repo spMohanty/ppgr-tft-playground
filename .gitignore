@@ -181,3 +181,11 @@ data/
 playground.ipynb
 
 checkpoints/
+
+logs/
+
+
+slurm-*.out
+
+
+cache/
