@@ -15,6 +15,9 @@ import click
 from rich.progress import Progress, TextColumn, BarColumn, TimeRemainingColumn
 from rich.console import Console
 
+import wandb
+import matplotlib.pyplot as plt
+
 # PyTorch Forecasting and Lightning imports
 from pytorch_forecasting import (
     Baseline,
@@ -43,18 +46,18 @@ class Config:
     debug_mode: bool = False
 
     # Data slicing parameters
-    max_encoder_length: int = 12 * 4  # encoder window length
-    max_prediction_length: int = int(2.5 * 4)  # prediction horizon (2.5 hours)
+    max_encoder_length: int = 8 * 4  # encoder window length
+    max_prediction_length: int = int(2 * 4)  # prediction horizon (2.5 hours)
     validation_percentage: float = 0.1
     test_percentage: float = 0.1
 
     # DataLoader parameters
     batch_size: int = 128
-    num_workers: int = 15
+    num_workers: int = 4
 
     # Model hyperparameters
-    learning_rate: float = 1e-4
-    hidden_size: int = 32
+    learning_rate: float = 1e-2
+    hidden_size: int = 8
     attention_head_size: int = 4
     dropout: float = 0.1
     hidden_continuous_size: int = 8
@@ -191,23 +194,29 @@ def compute_metric_correlations(metrics: dict, correlation_calc_fn: Any) -> dict
 # Custom Callback for iAUC Validation Metric
 # -----------------------------------------------------------------------------
 class PPGRMetricsCallback(pl.Callback):
-    def __init__(self, mode: str = "val"):
+    def __init__(self, mode: str = "val", num_plots: int = 6):
         """
         Args:
             mode: either "val" or "test". This determines which hook methods are active
                   and the metric prefix used when logging.
+            num_plots: number of random samples to plot
         """
         super().__init__()
         self.mode = mode
+        self.num_plots = num_plots
         self.reset_metrics()
         self.correlation_calc_function = PearsonCorrCoef()
-        # This dictionary will hold the final computed metrics for this callback run.
         self.final_metrics = {}
+        self.plot_indices = None  # Will store the random indices
+        self.metric_data = {}  # Store all metrics data
 
     def reset_metrics(self):
         self.all_predictions = []
         self.all_targets = []
         self.all_encoder_values = []
+        
+        self.raw_batch_data = []
+        self.raw_prediction_outputs = []
 
     def _process_batch(self, pl_module, batch):
         past_data, future_data = batch
@@ -219,36 +228,156 @@ class PPGRMetricsCallback(pl.Callback):
         self.all_targets.append(past_data["decoder_target"])
         self.all_encoder_values.append(past_data["encoder_target"])
 
+        self.raw_batch_data.append(batch)
+        self.raw_prediction_outputs.append(outputs)
+
+
+    def plot_predictions(self, pl_module, batch_index_to_use: int = 0):
+        batch_data = self.raw_batch_data[batch_index_to_use]
+        past_data, future_data = batch_data
+        prediction_outputs = self.raw_prediction_outputs[batch_index_to_use]
+        
+        # Initialize plot indices if not already set
+        if self.plot_indices is None:
+            batch_size = past_data["encoder_target"].shape[0]
+            self.plot_indices = random.sample(range(batch_size), min(self.num_plots, batch_size))
+            logger.info(f"Selected indices for plotting: {self.plot_indices}")
+        
+        # Plot each selected index
+        for idx in self.plot_indices:
+            _fig = pl_module.plot_prediction(past_data, prediction_outputs, idx)
+            
+            pl_module.logger.experiment.log({
+                f"predictions_sample_{idx}": wandb.Image(_fig)
+            }, step=pl_module.global_step)
+
     # Activate the proper hook based on mode.
     def on_validation_batch_end(self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx=0):
         if self.mode == "val":
             self._process_batch(pl_module, batch)
-
+            
     def on_test_batch_end(self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx=0):
         if self.mode == "test":
             self._process_batch(pl_module, batch)
 
+    def plot_metric_scatter(self, metric_type: str, max_points: int = 10000):
+        """
+        Create scatter plots comparing predicted vs actual values for different metrics.
+        
+        Args:
+            metric_type: String indicating which type of metric to plot ('iauc', 'auc', or 'cgm')
+            max_points: Maximum number of points to plot (will randomly subsample if exceeded)
+        """
+        import matplotlib.pyplot as plt
+        import seaborn as sns
+        
+        if metric_type == 'iauc':
+            metrics_to_plot = ["iauc_l2", "iauc_l3", "iauc_min_l2", "iauc_min_l3", "iauc_l1"]
+            n_rows, n_cols = 2, 3
+            figsize = (15, 10)
+            title_prefix = 'iAUC'
+        elif metric_type == 'auc':
+            metrics_to_plot = ["auc"]
+            n_rows, n_cols = 1, 1
+            figsize = (6, 6)
+            title_prefix = 'AUC'
+        elif metric_type == 'cgm':
+            metrics_to_plot = ["raw_cgm"]
+            n_rows, n_cols = 1, 1
+            figsize = (6, 6)
+            title_prefix = 'CGM'
+        else:
+            raise ValueError(f"Unknown metric type: {metric_type}")
+
+        fig, axes = plt.subplots(n_rows, n_cols, figsize=figsize)
+        if not isinstance(axes, np.ndarray):
+            axes = np.array([axes])
+        axes = axes.flatten()
+
+        metrics_data = self.metric_data.get(metric_type)
+        if metrics_data is None:
+            logger.warning(f"No data available for metric type: {metric_type}")
+            return None
+
+        for idx, metric in enumerate(metrics_to_plot):
+            if idx >= len(axes):
+                break
+                
+            pred = metrics_data["predictions"][metric].cpu().numpy()
+            true = metrics_data["ground_truth"][metric].cpu().numpy()
+            
+            # Random subsampling if number of points exceeds max_points
+            n_points = len(pred)
+            if n_points > max_points:
+                indices = np.random.choice(n_points, max_points, replace=False)
+                pred = pred[indices]
+                true = true[indices]
+            
+            # Create scatter plot
+            sns.scatterplot(x=true, y=pred, s=0.5, alpha=0.5, ax=axes[idx])
+                        
+            # Add labels and title
+            axes[idx].set_xlabel(f'True {title_prefix}')
+            axes[idx].set_ylabel(f'Predicted {title_prefix}')
+            axes[idx].set_title(f'{metric} Scatter Plot\n(n={len(pred):,} points)')
+            
+            # Use the pre-calculated correlation from self.final_metrics
+            metric_key = f"{self.mode}_{metric}_corr"
+            if metric_key in self.final_metrics:
+                corr = self.final_metrics[metric_key].item()
+                axes[idx].text(0.05, 0.95, f'r = {corr:.3f}', 
+                             transform=axes[idx].transAxes, 
+                             bbox=dict(facecolor='white', alpha=0.8))
+        
+        # Remove extra subplots if present
+        if len(metrics_to_plot) < len(axes):
+            for ax in axes[len(metrics_to_plot):]:
+                fig.delaxes(ax)
+            
+        plt.tight_layout()
+        return fig
+
     def _compute_metrics(self):
-        # Concatenate the lists of tensors along the batch dimension.
+        # Concatenate the lists of tensors along the batch dimension
         all_preds = torch.cat(self.all_predictions, dim=0)
         all_targets = torch.cat(self.all_targets, dim=0)
         all_encoder_values = torch.cat(self.all_encoder_values, dim=0)
 
+        # Compute all metrics
         iauc_metrics = compute_iauc_metrics(all_targets, all_preds, all_encoder_values)
         auc_metrics = compute_auc_metrics(all_targets, all_preds, all_encoder_values)
-        
-        # Ensure correlation function is on the same device as the metrics
-        self.correlation_calc_function =  self.correlation_calc_function.to(all_targets.device)
-        
-        iauc_correlations = compute_metric_correlations(iauc_metrics, self.correlation_calc_function)
-        auc_correlations = compute_metric_correlations(auc_metrics, self.correlation_calc_function)
         raw_cgm_metrics = {
             "predictions": {"raw_cgm": all_preds.flatten()},
             "ground_truth": {"raw_cgm": all_targets.flatten()}
         }
+        
+        # Store metrics data for plotting
+        self.metric_data = {
+            'iauc': iauc_metrics,
+            'auc': auc_metrics,
+            'cgm': raw_cgm_metrics
+        }
+        
+        # Ensure correlation function is on the same device as the metrics
+        self.correlation_calc_function = self.correlation_calc_function.to(all_targets.device)
+        
+        # Compute correlations
+        iauc_correlations = compute_metric_correlations(iauc_metrics, self.correlation_calc_function)
+        auc_correlations = compute_metric_correlations(auc_metrics, self.correlation_calc_function)
         raw_cgm_correlations = compute_metric_correlations(raw_cgm_metrics, self.correlation_calc_function)
 
-        # Combine the metrics into one dictionary with a prefix (either "val_" or "test_")
+        # Create and log scatter plots for each metric type
+        if hasattr(self, 'trainer') and self.trainer is not None:
+            current_step = self.trainer.global_step
+            for metric_type in ['iauc', 'auc', 'cgm']:
+                scatter_fig = self.plot_metric_scatter(metric_type)
+                if scatter_fig:
+                    self.trainer.logger.experiment.log({
+                        f"{self.mode}_{metric_type}_scatter": wandb.Image(scatter_fig)
+                    }, step=current_step)
+                    plt.close(scatter_fig)
+
+        # Combine the metrics into one dictionary with a prefix
         prefix = f"{self.mode}_"
         final = {}
         for metric_dict in [iauc_correlations, auc_correlations, raw_cgm_correlations]:
@@ -258,19 +387,29 @@ class PPGRMetricsCallback(pl.Callback):
 
     def on_validation_epoch_end(self, trainer, pl_module):
         if self.mode == "val":
+            self.trainer = trainer  # Store trainer reference for plotting
             final = self._compute_metrics()
             for key, value in final.items():
-                # Log the metric so that it appears in your progress bar and logs.
                 pl_module.log(key, value, prog_bar=True)
-            self.final_metrics = final  # Store the final metrics for later extraction
+
+            # Plot predictions
+            self.plot_predictions(pl_module)
+
+            self.final_metrics = final
             self.reset_metrics()
+            
 
     def on_test_epoch_end(self, trainer, pl_module):
         if self.mode == "test":
+            self.trainer = trainer  # Store trainer reference for plotting
             final = self._compute_metrics()
             for key, value in final.items():
                 pl_module.log(key, value, prog_bar=True)
-            self.final_metrics = final  # Store the final metrics for later extraction
+                
+            # Plot predictions
+            self.plot_predictions(pl_module)
+                
+            self.final_metrics = final
             self.reset_metrics()
 
 
@@ -447,8 +586,41 @@ def main(debug):
     
     # Debug overrides
     if config.debug_mode:
-        config.max_epochs = 10
+        config.max_epochs = 4
     
+    # Create hyperparameter dictionary for wandb logging
+    hyperparameters = {
+        # General configuration
+        "random_seed": config.random_seed,
+        "dataset_version": config.dataset_version,
+        "debug_mode": config.debug_mode,
+        
+        # Data slicing parameters
+        "max_encoder_length": config.max_encoder_length,
+        "max_prediction_length": config.max_prediction_length,
+        "validation_percentage": config.validation_percentage,
+        "test_percentage": config.test_percentage,
+        
+        # DataLoader parameters
+        "batch_size": config.batch_size,
+        "num_workers": config.num_workers,
+        
+        # Model hyperparameters
+        "learning_rate": config.learning_rate,
+        "hidden_size": config.hidden_size,
+        "attention_head_size": config.attention_head_size,
+        "dropout": config.dropout,
+        "hidden_continuous_size": config.hidden_continuous_size,
+        
+        # Trainer parameters
+        "max_epochs": config.max_epochs,
+        "gradient_clip_val": config.gradient_clip_val,
+        
+        # Early stopping parameters
+        "early_stop_patience": config.early_stop_patience,
+        "early_stop_min_delta": config.early_stop_min_delta,
+    }
+
     # Set random seed and other configurations
     np.random.seed(config.random_seed)
     torch.manual_seed(config.random_seed)
@@ -535,8 +707,8 @@ def main(debug):
         filename="{epoch}-{val_loss:.4f}" 
     )
 
-    # Set up the WandB logger
-    wandb_logger = WandbLogger(project=config.wandb_project)
+    # Set up the WandB logger with hyperparameters
+    wandb_logger = WandbLogger(project=config.wandb_project, config=hyperparameters)
 
     # Build the PyTorch Lightning trainer with all callbacks
     trainer = pl.Trainer(
