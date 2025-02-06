@@ -24,8 +24,10 @@ from pytorch_forecasting import (
 from pytorch_forecasting.data import GroupNormalizer
 from pytorch_forecasting.metrics import QuantileLoss
 
+
+
 import lightning.pytorch as pl
-from lightning.pytorch.callbacks import EarlyStopping, LearningRateMonitor
+from lightning.pytorch.callbacks import EarlyStopping, LearningRateMonitor, ModelCheckpoint
 from lightning.pytorch.loggers import WandbLogger
 
 from torchmetrics.regression import PearsonCorrCoef
@@ -47,12 +49,12 @@ class Config:
     test_percentage: float = 0.1
 
     # DataLoader parameters
-    batch_size: int = 64
+    batch_size: int = 128
     num_workers: int = 15
 
     # Model hyperparameters
-    learning_rate: float = 0.03
-    hidden_size: int = 8
+    learning_rate: float = 1e-4
+    hidden_size: int = 32
     attention_head_size: int = 4
     dropout: float = 0.1
     hidden_continuous_size: int = 8
@@ -62,11 +64,20 @@ class Config:
     gradient_clip_val: float = 0.1
 
     # Early stopping parameters
+    early_stop_monitor_metric: str = "val_loss"
+    early_stop_monitor_metric_mode: str = "min"
     early_stop_patience: int = 10
     early_stop_min_delta: float = 1e-4
 
     # Logger parameters
     wandb_project: str = "tft-ppgr-2025"
+    
+    # Checkpoint parameters
+    checkpoint_monitor_metric: str = "val_loss"
+    checkpoint_monitor_metric_mode: str = "min"
+    checkpoint_dir: str = "/scratch/mohanty/checkpoints/tft-ppgr-2025"
+    checkpoint_top_k: int = 5
+    
 
 # -----------------------------------------------------------------------------
 # Custom iAUC Metric
@@ -179,99 +190,90 @@ def compute_metric_correlations(metrics: dict, correlation_calc_fn: Any) -> dict
 # -----------------------------------------------------------------------------
 # Custom Callback for iAUC Validation Metric
 # -----------------------------------------------------------------------------
-class IAUCValidationCallback(pl.Callback):
-    def __init__(self):
+class PPGRMetricsCallback(pl.Callback):
+    def __init__(self, mode: str = "val"):
         """
+        Args:
+            mode: either "val" or "test". This determines which hook methods are active
+                  and the metric prefix used when logging.
         """
         super().__init__()
-        self.reset_validation_metrics()
-        
+        self.mode = mode
+        self.reset_metrics()
         self.correlation_calc_function = PearsonCorrCoef()
+        # This dictionary will hold the final computed metrics for this callback run.
+        self.final_metrics = {}
 
-    def reset_validation_metrics(self):
-        """Reset accumulated metrics at the start of validation."""
+    def reset_metrics(self):
         self.all_predictions = []
         self.all_targets = []
         self.all_encoder_values = []
 
-    def on_validation_start(self, trainer, pl_module):
-        """Reset metrics at the start of validation."""
-        self.reset_validation_metrics()
-
-    def on_validation_batch_end(
-        self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx=0
-    ):
-        """Accumulate predictions and targets from each batch."""
-                
-        # Unpack TFT's temporal components from batch
+    def _process_batch(self, pl_module, batch):
         past_data, future_data = batch
-        
-        # Do an explicity forward pass to get the predictions
-        # TODO: check why outputs is not carrying this information
-        _outputs = pl_module(past_data)
-        
-        predictions = _outputs["prediction"]
-        median_quantile_index = 3  # 3 is the median quantile index
+        outputs = pl_module(past_data)
+        predictions = outputs["prediction"]
+        median_quantile_index = 3  # Using the median quantile for point forecasts
         point_forecast = predictions[:, :, median_quantile_index]
-        
-        
-        # gather all context
-        self.all_encoder_values.append(past_data["encoder_target"])
-        self.all_targets.append(past_data["decoder_target"])
         self.all_predictions.append(point_forecast)
-        
-        
-    def on_validation_epoch_end(self, trainer, pl_module):
-        """Calculate iAUC using accumulated predictions and targets."""
-        # Concatenate all accumulated tensors
+        self.all_targets.append(past_data["decoder_target"])
+        self.all_encoder_values.append(past_data["encoder_target"])
+
+    # Activate the proper hook based on mode.
+    def on_validation_batch_end(self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx=0):
+        if self.mode == "val":
+            self._process_batch(pl_module, batch)
+
+    def on_test_batch_end(self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx=0):
+        if self.mode == "test":
+            self._process_batch(pl_module, batch)
+
+    def _compute_metrics(self):
+        # Concatenate the lists of tensors along the batch dimension.
         all_preds = torch.cat(self.all_predictions, dim=0)
         all_targets = torch.cat(self.all_targets, dim=0)
         all_encoder_values = torch.cat(self.all_encoder_values, dim=0)
 
-        # Compute iAUC using the provided function
         iauc_metrics = compute_iauc_metrics(all_targets, all_preds, all_encoder_values)
         auc_metrics = compute_auc_metrics(all_targets, all_preds, all_encoder_values)
         
-        # Ensure that correlation calc function is on the same device as the metrics
-        self.correlation_calc_function.to(all_preds.device)
+        # Ensure correlation function is on the same device as the metrics
+        self.correlation_calc_function =  self.correlation_calc_function.to(all_targets.device)
         
-        
-        
-        
-        # Compute iAUC correlations
         iauc_correlations = compute_metric_correlations(iauc_metrics, self.correlation_calc_function)
-        
-        # Compute AUC correlations
         auc_correlations = compute_metric_correlations(auc_metrics, self.correlation_calc_function)
-        
-        # Compute raw CGM correlations
         raw_cgm_metrics = {
-            "predictions": {
-                "raw_cgm": all_preds.flatten(),
-            },
-            "ground_truth": {
-                "raw_cgm": all_targets.flatten()
-            }
+            "predictions": {"raw_cgm": all_preds.flatten()},
+            "ground_truth": {"raw_cgm": all_targets.flatten()}
         }
         raw_cgm_correlations = compute_metric_correlations(raw_cgm_metrics, self.correlation_calc_function)
-        
-        
-        
-        # Log the custom metrics
-        ## iAUC 
-        for metric_name, metric_value in iauc_correlations.items():
-            pl_module.log(f"val_{metric_name}", metric_value, prog_bar=True)
-        
-        # AUC
-        for metric_name, metric_value in auc_correlations.items():
-            pl_module.log(f"val_{metric_name}", metric_value, prog_bar=True)
-        
-        # RAW CGM values
-        for metric_name, metric_value in raw_cgm_correlations.items():
-            pl_module.log(f"val_{metric_name}", metric_value, prog_bar=True)
-        
-        # Clean up
-        self.reset_validation_metrics()
+
+        # Combine the metrics into one dictionary with a prefix (either "val_" or "test_")
+        prefix = f"{self.mode}_"
+        final = {}
+        for metric_dict in [iauc_correlations, auc_correlations, raw_cgm_correlations]:
+            for k, v in metric_dict.items():
+                final[f"{prefix}{k}"] = v
+        return final
+
+    def on_validation_epoch_end(self, trainer, pl_module):
+        if self.mode == "val":
+            final = self._compute_metrics()
+            for key, value in final.items():
+                # Log the metric so that it appears in your progress bar and logs.
+                pl_module.log(key, value, prog_bar=True)
+            self.final_metrics = final  # Store the final metrics for later extraction
+            self.reset_metrics()
+
+    def on_test_epoch_end(self, trainer, pl_module):
+        if self.mode == "test":
+            final = self._compute_metrics()
+            for key, value in final.items():
+                pl_module.log(key, value, prog_bar=True)
+            self.final_metrics = final  # Store the final metrics for later extraction
+            self.reset_metrics()
+
+
 
 # -----------------------------------------------------------------------------
 # Data Loading and Preprocessing Functions
@@ -414,6 +416,7 @@ def create_time_series_dataset(
 def create_dataloaders(
     training_dataset: TimeSeriesDataSet,
     validation_dataset: TimeSeriesDataSet,
+    test_dataset: TimeSeriesDataSet,
     batch_size: int,
     num_workers: int = 15,
 ) -> Tuple[DataLoader, DataLoader]:
@@ -426,7 +429,11 @@ def create_dataloaders(
     val_loader = validation_dataset.to_dataloader(
         train=False, batch_size=batch_size * 10, num_workers=num_workers
     )
-    return train_loader, val_loader
+    test_loader = test_dataset.to_dataloader(
+        train=False, batch_size=batch_size * 10, num_workers=num_workers
+    )
+    
+    return train_loader, val_loader, test_loader
 
 
 # -----------------------------------------------------------------------------
@@ -473,10 +480,15 @@ def main(debug):
     validation_dataset = create_time_series_dataset(
         val_df, config.max_encoder_length, config.max_prediction_length, food_covariates, predict_mode=False
     )
+    
+    test_dataset = create_time_series_dataset(
+        test_df, config.max_encoder_length, config.max_prediction_length, food_covariates, predict_mode=True
+    )
+    
 
     # Create dataloaders
-    train_loader, val_loader = create_dataloaders(
-        training_dataset, validation_dataset, config.batch_size, num_workers=config.num_workers
+    train_loader, val_loader, test_loader = create_dataloaders(
+        training_dataset, validation_dataset, test_dataset, config.batch_size, num_workers=config.num_workers
     )
 
     # Check CUDA availability
@@ -502,16 +514,26 @@ def main(debug):
 
     # Build the PyTorch Lightning callbacks
     early_stop_callback = EarlyStopping(
-        monitor="val_loss",
+        monitor=config.early_stop_monitor_metric,
         min_delta=config.early_stop_min_delta,
         patience=config.early_stop_patience,
         verbose=False,
-        mode="min"
+        mode=config.early_stop_monitor_metric_mode
     )
     lr_logger = LearningRateMonitor()  # Logs the learning rate during training
 
     # Instantiate the custom iAUC callback with the validation dataloader and compute function
-    iauc_callback = IAUCValidationCallback()
+    ppgr_metrics_val_callback = PPGRMetricsCallback(mode="val")
+    ppgr_metrics_test_callback = PPGRMetricsCallback(mode="test")
+
+    # Instantiate the ModelCheckpoint callback
+    checkpoint_callback = ModelCheckpoint(
+        monitor=config.checkpoint_monitor_metric,
+        mode=config.checkpoint_monitor_metric_mode,
+        save_top_k=config.checkpoint_top_k,  # Save only the best model.
+        dirpath=config.checkpoint_dir,
+        filename="{epoch}-{val_loss:.4f}" 
+    )
 
     # Set up the WandB logger
     wandb_logger = WandbLogger(project=config.wandb_project)
@@ -522,12 +544,22 @@ def main(debug):
         accelerator="auto",
         enable_model_summary=True,
         gradient_clip_val=config.gradient_clip_val,
-        callbacks=[lr_logger, early_stop_callback, iauc_callback],
+        callbacks=[lr_logger, early_stop_callback, ppgr_metrics_val_callback, ppgr_metrics_test_callback],
         logger=wandb_logger,
     )
 
     # Start training
     trainer.fit(tft_model, train_dataloaders=train_loader, val_dataloaders=val_loader)
+    
+    # Run test loop
+    trainer.test(tft_model, dataloaders=test_loader)
+
+    # Extract final test metrics from the test callback.
+    final_test_metrics = ppgr_metrics_test_callback.final_metrics
+    print("Final Test Metrics:")
+    for metric_name, metric_value in final_test_metrics.items():
+        # Assuming metric_value is a tensor, convert to a Python float.
+        print(metric_name, metric_value.item())
 
 
 if __name__ == "__main__":
