@@ -51,7 +51,7 @@ class Config:
     debug_mode: bool = False
 
     # WandB configuration
-    wandb_project: str = "tft-ppgr-2025"
+    wandb_project: str = "tft-ppgr-2025-debug"
     wandb_dir: str = "/scratch/mohanty/wandb"
 
 
@@ -894,7 +894,7 @@ def main(**kwargs):
         dropout=config.dropout,
         hidden_continuous_size=config.hidden_continuous_size,
         loss=QuantileLoss(),
-        log_interval=50,  # Adjust as needed for logging frequency
+        log_interval=5,  # Adjust as needed for logging frequency
         optimizer="ranger",
         reduce_on_plateau_patience=4,
     )

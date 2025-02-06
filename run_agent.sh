@@ -13,7 +13,7 @@ WANDB_ENTITY="mfr-ppgr-2025"
 WANDB_PROJECT="tft-ppgr-2025"
 WANDB_SWEEP_ID="geysk990"
 
-NUM_AGENTS=3 # 6 for h100 and 3 for l40s
+NUM_AGENTS=2 # 6 for h100 and 3 for l40s
 
 cd /home/mohanty/food/pytorch-forecasting-playground
 
