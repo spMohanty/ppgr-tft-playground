@@ -2,7 +2,7 @@ import os
 import warnings
 import random
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from typing import List, Tuple, Any
 
 import numpy as np
@@ -41,9 +41,16 @@ from torchmetrics.regression import PearsonCorrCoef
 @dataclass
 class Config:
     # General configuration
+    experiment_name: str = "tft-ppgr-2025-fo"
+    
     random_seed: int = 42
     dataset_version: str = "v0.3"
     debug_mode: bool = False
+
+    # WandB configuration
+    wandb_project: str = "tft-ppgr-2025"
+    wandb_dir: str = "/scratch/mohanty/wandb"
+
 
     # Data slicing parameters
     max_encoder_length: int = 8 * 4  # encoder window length
@@ -73,7 +80,6 @@ class Config:
     early_stop_min_delta: float = 1e-4
 
     # Logger parameters
-    wandb_project: str = "tft-ppgr-2025"
     
     # Checkpoint parameters
     checkpoint_monitor_metric: str = "val_loss"
@@ -232,7 +238,7 @@ class PPGRMetricsCallback(pl.Callback):
         self.raw_prediction_outputs.append(outputs)
 
 
-    def plot_predictions(self, pl_module, batch_index_to_use: int = 0):
+    def plot_predictions(self, trainer, pl_module, batch_index_to_use: int = 0):
         batch_data = self.raw_batch_data[batch_index_to_use]
         past_data, future_data = batch_data
         prediction_outputs = self.raw_prediction_outputs[batch_index_to_use]
@@ -247,9 +253,9 @@ class PPGRMetricsCallback(pl.Callback):
         for idx in self.plot_indices:
             _fig = pl_module.plot_prediction(past_data, prediction_outputs, idx)
             
-            pl_module.logger.experiment.log({
+            trainer.logger.experiment.log({
                 f"predictions_sample_{idx}": wandb.Image(_fig)
-            }, step=pl_module.global_step)
+            })
 
     # Activate the proper hook based on mode.
     def on_validation_batch_end(self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx=0):
@@ -335,6 +341,9 @@ class PPGRMetricsCallback(pl.Callback):
                 fig.delaxes(ax)
             
         plt.tight_layout()
+        
+        # Add explicit figure close in case the caller doesn't use the returned figure
+        plt.close()
         return fig
 
     def _compute_metrics(self):
@@ -368,13 +377,12 @@ class PPGRMetricsCallback(pl.Callback):
 
         # Create and log scatter plots for each metric type
         if hasattr(self, 'trainer') and self.trainer is not None:
-            current_step = self.trainer.global_step
             for metric_type in ['iauc', 'auc', 'cgm']:
                 scatter_fig = self.plot_metric_scatter(metric_type)
                 if scatter_fig:
                     self.trainer.logger.experiment.log({
                         f"{self.mode}_{metric_type}_scatter": wandb.Image(scatter_fig)
-                    }, step=current_step)
+                    })
                     plt.close(scatter_fig)
 
         # Combine the metrics into one dictionary with a prefix
@@ -390,10 +398,10 @@ class PPGRMetricsCallback(pl.Callback):
             self.trainer = trainer  # Store trainer reference for plotting
             final = self._compute_metrics()
             for key, value in final.items():
-                pl_module.log(key, value, prog_bar=True)
+                pl_module.log(key, value, prog_bar=True, sync_dist=True)
 
             # Plot predictions
-            self.plot_predictions(pl_module)
+            self.plot_predictions(trainer, pl_module)
 
             self.final_metrics = final
             self.reset_metrics()
@@ -404,10 +412,10 @@ class PPGRMetricsCallback(pl.Callback):
             self.trainer = trainer  # Store trainer reference for plotting
             final = self._compute_metrics()
             for key, value in final.items():
-                pl_module.log(key, value, prog_bar=True)
+                pl_module.log(key, value, prog_bar=True, sync_dist=True)
                 
             # Plot predictions
-            self.plot_predictions(pl_module)
+            self.plot_predictions(trainer, pl_module)
                 
             self.final_metrics = final
             self.reset_metrics()
@@ -578,16 +586,128 @@ def create_dataloaders(
 # -----------------------------------------------------------------------------
 # Main Function
 # -----------------------------------------------------------------------------
+def create_click_options(config_class):
+    """Create click options automatically from a dataclass's fields."""
+    def decorator(f):
+        # Reverse the fields so the decorators are applied in the correct order
+        for field in reversed(fields(config_class)):
+            # Get the field type and default value
+            param_type = field.type
+            default_value = field.default
+            
+            # Convert type hints to click types
+            type_mapping = {
+                str: str,
+                int: int,
+                float: float,
+                bool: bool
+            }
+            param_type = type_mapping.get(param_type, str)
+            
+            # Create the click option with both hyphen and underscore versions
+            hyphen_name = f"--{field.name.replace('_', '-')}"
+            underscore_name = f"--{field.name}"
+            
+            # Add aliases for specific parameters
+            aliases = []
+            if field.name == "debug_mode":
+                aliases.append("--debug")
+            
+            # Combine all option names
+            option_names = [hyphen_name, underscore_name] + aliases
+            
+            if param_type == bool:
+                # Handle boolean flags differently
+                f = click.option(
+                    *option_names,
+                    is_flag=True,
+                    default=default_value,
+                    help=f"Default: {default_value}"
+                )(f)
+            else:
+                f = click.option(
+                    *option_names,
+                    type=param_type,
+                    default=default_value,
+                    help=f"Default: {default_value}"
+                )(f)
+        return f
+    return decorator
+
 @click.command()
-@click.option('--debug', is_flag=True, default=False, help='Enable debug mode')
-def main(debug):
-    # Initialize configuration (override the debug flag from the command-line)
-    config = Config(debug_mode=debug)
+@create_click_options(Config)
+def main(**kwargs):
+    """
+    All CLI arguments are automatically collected in kwargs
+    and passed to Config constructor
+    """
+    
+    # Initialize configuration with CLI parameters
+    config = Config(**kwargs)
+    
+    # Create a meaningful experiment name based on hyperparameters
+    base_name = config.experiment_name
+    experiment_name_parts = [
+        base_name,  # Keep base name as prefix
+        f"hs{config.hidden_size}",
+        f"ahs{config.attention_head_size}",
+        f"hcs{config.hidden_continuous_size}",
+        f"d{int(config.dropout*100)}",
+        f"lr{config.learning_rate:.0e}",
+        f"bs{config.batch_size}"
+    ]
+    config.experiment_name = "-".join(experiment_name_parts)
+    
+    # Set wandb directory before initializing
+    os.makedirs(config.wandb_dir, exist_ok=True)
+    os.environ["WANDB_DIR"] = config.wandb_dir
+    print(f"WANDB_DIR: {os.environ['WANDB_DIR']}")
+
+    # Initialize wandb
+    wandb.init(
+        project=config.wandb_project,
+        name=config.experiment_name,
+        dir=config.wandb_dir,
+        settings=wandb.Settings(start_method="thread")
+    )
+    print(f"Wandb directory: {wandb.run.dir}")
+
+
+    # Initialize wandb first
+    wandb_logger = WandbLogger(
+        project=config.wandb_project,
+        name=config.experiment_name
+    )
     
     # Debug overrides
     if config.debug_mode:
         config.max_epochs = 4
-    
+        
+    # When running a sweep, wandb.config will contain the current run's hyperparameters.
+    # Override the default config values if they exist in wandb.config.
+    if hasattr(wandb, 'config') and wandb.run is not None:
+        config.learning_rate = wandb.config.get("learning_rate", config.learning_rate)
+        config.hidden_size = wandb.config.get("hidden_size", config.hidden_size)
+        config.attention_head_size = wandb.config.get("attention_head_size", config.attention_head_size)
+        config.dropout = wandb.config.get("dropout", config.dropout)
+        config.hidden_continuous_size = wandb.config.get("hidden_continuous_size", config.hidden_continuous_size)
+        config.max_epochs = wandb.config.get("max_epochs", config.max_epochs)
+        config.batch_size = wandb.config.get("batch_size", config.batch_size)
+        
+        # Update experiment name with sweep parameters
+        experiment_name_parts = [
+            base_name,  # Keep base name as prefix
+            f"hs{config.hidden_size}",
+            f"ahs{config.attention_head_size}",
+            f"hcs{config.hidden_continuous_size}",
+            f"d{int(config.dropout*100)}",
+            f"lr{config.learning_rate:.0e}",
+            f"bs{config.batch_size}"
+        ]
+        new_name = "-".join(experiment_name_parts)
+        wandb.run.name = new_name
+        wandb.run.save()
+
     # Create hyperparameter dictionary for wandb logging
     hyperparameters = {
         # General configuration
@@ -620,6 +740,9 @@ def main(debug):
         "early_stop_patience": config.early_stop_patience,
         "early_stop_min_delta": config.early_stop_min_delta,
     }
+
+    # Update wandb config with all hyperparameters
+    wandb_logger.log_hyperparams(hyperparameters)
 
     # Set random seed and other configurations
     np.random.seed(config.random_seed)
@@ -707,9 +830,6 @@ def main(debug):
         filename="{epoch}-{val_loss:.4f}" 
     )
 
-    # Set up the WandB logger with hyperparameters
-    wandb_logger = WandbLogger(project=config.wandb_project, config=hyperparameters)
-
     # Build the PyTorch Lightning trainer with all callbacks
     trainer = pl.Trainer(
         max_epochs=config.max_epochs,
@@ -718,6 +838,8 @@ def main(debug):
         gradient_clip_val=config.gradient_clip_val,
         callbacks=[lr_logger, early_stop_callback, ppgr_metrics_val_callback, ppgr_metrics_test_callback],
         logger=wandb_logger,
+        val_check_interval=0.25,  # Run validation 3 times per epoch
+        check_val_every_n_epoch=1  # Ensure we check validation every epoch
     )
 
     # Start training
