@@ -18,12 +18,31 @@ import pandas as pd
 import torch
 
 from pytorch_forecasting import Baseline, TemporalFusionTransformer, TimeSeriesDataSet
-from pytorch_forecasting.data import GroupNormalizer
-from pytorch_forecasting.metrics import MAE, SMAPE, PoissonLoss, QuantileLoss
-from pytorch_forecasting.models.temporal_fusion_transformer.tuning import optimize_hyperparameters
 
 
+class PPGRTemporalFusionTransformer(TemporalFusionTransformer):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        
+        self.validation_batch_full_outputs = []
+        self.test_batch_full_outputs = []
 
-def train_model(train_dataset_df: pd.DataFrame, val_dataset_df: pd.DataFrame, test_dataset_df: pd.DataFrame):
-    pass
-
+    def validation_step(self, batch, batch_idx):
+        
+        x, y = batch
+        log, out = self.step(x, y, batch_idx)
+        log.update(self.create_log(x, y, out, batch_idx))
+        self.validation_step_outputs.append(log)
+        self.validation_batch_full_outputs.append((log, out))
+        return log
+        
+    def test_step(self, batch, batch_idx):
+        
+        self.test_batch_full_outputs = []        
+        x, y = batch
+        log, out = self.step(x, y, batch_idx)
+        log.update(self.create_log(x, y, out, batch_idx))
+        self.testing_step_outputs.append(log)
+        self.test_batch_full_outputs.append((log, out))
+        
+        return log

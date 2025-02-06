@@ -38,6 +38,8 @@ from lightning.pytorch.loggers import WandbLogger
 
 from torchmetrics.regression import PearsonCorrCoef
 
+from model import PPGRTemporalFusionTransformer
+
 # -----------------------------------------------------------------------------
 # Configuration Data Class
 # -----------------------------------------------------------------------------
@@ -89,6 +91,10 @@ class Config:
     checkpoint_monitor_metric_mode: str = "min"
     checkpoint_dir: str = "/scratch/mohanty/checkpoints/tft-ppgr-2025"
     checkpoint_top_k: int = 5
+    
+    # Performance 
+    
+    disable_all_plots: bool = True
     
 
 # -----------------------------------------------------------------------------
@@ -203,7 +209,7 @@ def compute_metric_correlations(metrics: dict, correlation_calc_fn: Any) -> dict
 # Custom Callback for iAUC Validation Metric
 # -----------------------------------------------------------------------------
 class PPGRMetricsCallback(pl.Callback):
-    def __init__(self, mode: str = "val", num_plots: int = 6):
+    def __init__(self, mode: str = "val", num_plots: int = 6, disable_all_plots: bool = False):
         """
         Args:
             mode: either "val" or "test". This determines which hook methods are active
@@ -218,7 +224,8 @@ class PPGRMetricsCallback(pl.Callback):
         self.final_metrics = {}
         self.plot_indices = None  # Will store the random indices
         self.metric_data = {}  # Store all metrics data
-
+        self.disable_all_plots = disable_all_plots
+        
     def reset_metrics(self):
         self.all_predictions = []
         self.all_targets = []
@@ -227,9 +234,9 @@ class PPGRMetricsCallback(pl.Callback):
         self.raw_batch_data = []
         self.raw_prediction_outputs = []
 
-    def _process_batch(self, pl_module, batch):
+    def _process_batch(self, pl_module, batch, outputs):        
         past_data, future_data = batch
-        outputs = pl_module(past_data)
+        # outputs = pl_module(past_data) # Patching the TFT Class to return the output instead of recomputing
         predictions = outputs["prediction"]
         median_quantile_index = 3  # Using the median quantile for point forecasts
         point_forecast = predictions[:, :, median_quantile_index]
@@ -242,6 +249,8 @@ class PPGRMetricsCallback(pl.Callback):
 
 
     def plot_predictions(self, trainer, pl_module, batch_index_to_use: int = 0):
+        if self.disable_all_plots: return
+        
         batch_data = self.raw_batch_data[batch_index_to_use]
         past_data, future_data = batch_data
         prediction_outputs = self.raw_prediction_outputs[batch_index_to_use]
@@ -263,11 +272,15 @@ class PPGRMetricsCallback(pl.Callback):
     # Activate the proper hook based on mode.
     def on_validation_batch_end(self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx=0):
         if self.mode == "val":
-            self._process_batch(pl_module, batch)
+            # TODO: refactor : I am sure theres a neater way to do this
+            log, outputs = pl_module.validation_batch_full_outputs[-1] # The last one that has been added 
+            self._process_batch(pl_module, batch, outputs)
             
     def on_test_batch_end(self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx=0):
         if self.mode == "test":
-            self._process_batch(pl_module, batch)
+            # TODO: refactor : I am sure theres a neater way to do this
+            log, outputs = pl_module.test_batch_full_outputs[-1] # The last one that has been added 
+            self._process_batch(pl_module, batch, outputs)
 
     def plot_metric_scatter(self, metric_type: str, max_points: int = 10000):
         """
@@ -279,6 +292,8 @@ class PPGRMetricsCallback(pl.Callback):
         """
         import matplotlib.pyplot as plt
         import seaborn as sns
+        
+        if self.disable_all_plots: return None
         
         if metric_type == 'iauc':
             metrics_to_plot = ["iauc_l2", "iauc_l3", "iauc_min_l2", "iauc_min_l3", "iauc_l1"]
@@ -810,7 +825,7 @@ def main(**kwargs):
     
     # Debug overrides
     if config.debug_mode:
-        config.max_epochs = 4
+        config.max_epochs = 1
         
     # When running a sweep, wandb.config will contain the current run's hyperparameters.
     # Override the default config values if they exist in wandb.config.
@@ -886,7 +901,7 @@ def main(**kwargs):
         logger.info("CUDA is not available. Using CPU.")
 
     # Build the Temporal Fusion Transformer model using the config parameters
-    tft_model = TemporalFusionTransformer.from_dataset(
+    tft_model = PPGRTemporalFusionTransformer.from_dataset(
         train_loader.dataset,
         learning_rate=config.learning_rate,
         hidden_size=config.hidden_size,
@@ -911,8 +926,8 @@ def main(**kwargs):
     lr_logger = LearningRateMonitor()  # Logs the learning rate during training
 
     # Instantiate the custom iAUC callback with the validation dataloader and compute function
-    ppgr_metrics_val_callback = PPGRMetricsCallback(mode="val")
-    ppgr_metrics_test_callback = PPGRMetricsCallback(mode="test")
+    ppgr_metrics_val_callback = PPGRMetricsCallback(mode="val", disable_all_plots=config.disable_all_plots)
+    ppgr_metrics_test_callback = PPGRMetricsCallback(mode="test", disable_all_plots=config.disable_all_plots)
 
     # Instantiate the ModelCheckpoint callback
     checkpoint_callback = ModelCheckpoint(
@@ -925,6 +940,7 @@ def main(**kwargs):
 
     # Build the PyTorch Lightning trainer with all callbacks
     trainer = pl.Trainer(
+        profiler="simple",
         max_epochs=config.max_epochs,
         accelerator="auto",
         enable_model_summary=True,
