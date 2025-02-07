@@ -65,6 +65,7 @@ class Config:
     max_prediction_length: int = int(2 * 4)  # prediction horizon (2.5 hours)
     validation_percentage: float = 0.1
     test_percentage: float = 0.1
+    no_data_cache: bool = False
 
     # DataLoader parameters
     batch_size: int = 256
@@ -618,7 +619,7 @@ def get_cached_time_series_datasets(config: Config, cache_dir: str = "cache/data
     val_cache_file = os.path.join(cache_dir, f"val_{cache_hash}.pt")
     test_cache_file = os.path.join(cache_dir, f"test_{cache_hash}.pt")
 
-    if os.path.exists(train_cache_file) and os.path.exists(val_cache_file) and os.path.exists(test_cache_file):
+    if (not config.no_data_cache) and os.path.exists(train_cache_file) and os.path.exists(val_cache_file) and os.path.exists(test_cache_file):
         logger.warning(f"Loading cached datasets from {cache_dir} for hash {cache_hash}")
         training_dataset = torch.load(train_cache_file)
         validation_dataset = torch.load(val_cache_file)
@@ -724,7 +725,8 @@ def get_cached_time_series_dataloaders(
     val_loader_cache = os.path.join(cache_dir, f"val_loader_{cache_hash}.pt")
     test_loader_cache = os.path.join(cache_dir, f"test_loader_{cache_hash}.pt")
     
-    if os.path.exists(train_loader_cache) and os.path.exists(val_loader_cache) and os.path.exists(test_loader_cache):
+    
+    if (not config.no_data_cache) and os.path.exists(train_loader_cache) and os.path.exists(val_loader_cache) and os.path.exists(test_loader_cache):
         logger.warning(f"Loading cached dataloaders from {cache_dir} for hash {cache_hash}")
         train_loader = torch.load(train_loader_cache)
         val_loader = torch.load(val_loader_cache)
