@@ -440,7 +440,7 @@ class PPGRMetricsCallback(pl.Callback):
             # Plot predictions
             self.plot_predictions(trainer, pl_module)
 
-            self.final_metrics = final
+            self.final_metrics = final # Used to reference the metrics post train/test runs
             self.reset_metrics()
             
 
@@ -454,7 +454,7 @@ class PPGRMetricsCallback(pl.Callback):
             # Plot predictions
             self.plot_predictions(trainer, pl_module)
                 
-            self.final_metrics = final
+            self.final_metrics = final # Used to reference the metrics post train/test runs
             self.reset_metrics()
 
 
