@@ -237,7 +237,7 @@ class PPGRMetricsCallback(pl.Callback):
         self.correlation_calc_function = PearsonCorrCoef()
         self.final_metrics = {}
         self.plot_indices = None  # Will store the random indices
-        self.metric_data = {}  # Store all metrics data
+        self.metrics_data = {}  # Store all metrics data
         self.disable_all_plots = disable_all_plots
                 
     def reset_metrics(self):
@@ -296,7 +296,7 @@ class PPGRMetricsCallback(pl.Callback):
             log, outputs = pl_module.test_batch_full_outputs[-1] # The last one that has been added 
             self._process_batch(pl_module, batch, outputs)
 
-    def plot_metric_scatter(self, metric_type: str, max_points: int = 10000):
+    def plot_metric_scatter(self, metric_type: str, metrics_data: dict, metric_correlations: dict, max_points: int = 10000):
         """
         Create scatter plots comparing predicted vs actual values for different metrics.
         
@@ -333,10 +333,11 @@ class PPGRMetricsCallback(pl.Callback):
             axes = np.array([axes])
         axes = axes.flatten()
 
-        metrics_data = self.metric_data.get(metric_type)
         if metrics_data is None:
             logger.warning(f"No data available for metric type: {metric_type}")
             return None
+        
+        metrics_data = metrics_data[metric_type]
 
         for idx, metric in enumerate(metrics_to_plot):
             if idx >= len(axes):
@@ -362,8 +363,8 @@ class PPGRMetricsCallback(pl.Callback):
             
             # Use the pre-calculated correlation from self.final_metrics
             metric_key = f"{self.mode}_{metric}_corr"
-            if metric_key in self.final_metrics:
-                corr = self.final_metrics[metric_key].item()
+            if metric_key in metric_correlations:
+                corr = metric_correlations[metric_key].item()
                 axes[idx].text(0.05, 0.95, f'r = {corr:.3f}', 
                              transform=axes[idx].transAxes, 
                              bbox=dict(facecolor='white', alpha=0.8))
@@ -394,7 +395,7 @@ class PPGRMetricsCallback(pl.Callback):
         }
         
         # Store metrics data for plotting
-        self.metric_data = {
+        self.metrics_data = {
             'iauc': iauc_metrics,
             'auc': auc_metrics,
             'cgm': raw_cgm_metrics
@@ -408,23 +409,26 @@ class PPGRMetricsCallback(pl.Callback):
         auc_correlations = compute_metric_correlations(auc_metrics, self.correlation_calc_function)
         raw_cgm_correlations = compute_metric_correlations(raw_cgm_metrics, self.correlation_calc_function)
 
+
+        # Combine the metrics into one dictionary with a prefix
+        prefix = f"{self.mode}_"
+        metric_correlations = {}
+        for metric_dict in [iauc_correlations, auc_correlations, raw_cgm_correlations]:
+            for k, v in metric_dict.items():
+                metric_correlations[f"{prefix}{k}"] = v
+
+
         # Create and log scatter plots for each metric type
         # if hasattr(self, 'trainer') and self.trainer is not None:
         for metric_type in ['iauc', 'auc', 'cgm']:
-            scatter_fig = self.plot_metric_scatter(metric_type)
+            scatter_fig = self.plot_metric_scatter(metric_type, self.metrics_data, metric_correlations)
             if scatter_fig:
                 self.trainer.logger.experiment.log({
                     f"{self.mode}_{metric_type}_scatter": wandb.Image(scatter_fig)
                 })
                 plt.close(scatter_fig)
 
-        # Combine the metrics into one dictionary with a prefix
-        prefix = f"{self.mode}_"
-        final = {}
-        for metric_dict in [iauc_correlations, auc_correlations, raw_cgm_correlations]:
-            for k, v in metric_dict.items():
-                final[f"{prefix}{k}"] = v
-        return final
+        return metric_correlations
 
     def on_validation_epoch_end(self, trainer, pl_module):
         if self.mode == "val":
@@ -946,6 +950,8 @@ def main(**kwargs):
     ppgr_metrics_test_callback = PPGRMetricsCallback(mode="test", 
                                                     disable_all_plots=config.disable_all_plots)
 
+    
+    print(f"checkpoint directory: {config.checkpoint_dir}")
     # Instantiate the ModelCheckpoint callback
     checkpoint_callback = ModelCheckpoint(
         monitor=config.checkpoint_monitor_metric,
