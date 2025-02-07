@@ -56,6 +56,9 @@ class Config:
     wandb_project: str = "tft-ppgr-2025-debug"
     wandb_dir: str = "/scratch/mohanty/wandb"
 
+    # Experiment Configuration
+    allow_negative_iauc_values: bool = True
+    
 
     # Data slicing parameters
     max_encoder_length: int = 8 * 4  # encoder window length
@@ -64,15 +67,15 @@ class Config:
     test_percentage: float = 0.1
 
     # DataLoader parameters
-    batch_size: int = 128
+    batch_size: int = 256
     num_workers: int = 4
 
     # Model hyperparameters
     learning_rate: float = 1e-2
     hidden_size: int = 256
     attention_head_size: int = 4
-    dropout: float = 0.1
-    hidden_continuous_size: int = 256
+    dropout: float = 0.15
+    hidden_continuous_size: int = 128
 
     # Trainer parameters
     max_epochs: int = 200
@@ -94,67 +97,78 @@ class Config:
     
     # Performance 
     
-    disable_all_plots: bool = True
+    disable_all_plots: bool = False
     
 
 # -----------------------------------------------------------------------------
 # Custom iAUC Metric
 # -----------------------------------------------------------------------------
 # Compute area using trapezoidal rule
-# torch.trapz needs values to be in float32/64    
-def _compute_iauc(predicted, baseline):
-    incremental = torch.maximum(predicted - baseline, torch.tensor(0.0))
+def _compute_iauc(predicted, baseline, allow_negative: bool = False):
+    # compute the incremental area under the curve
+    incremental = predicted - baseline
+    
+    # Clip negative values if not allowed
+    if not allow_negative:
+        incremental = torch.maximum(incremental, torch.tensor(0.0))
+        
     return torch.trapz(incremental.float(), dim=1)
 
-def compute_iauc_metrics(targets: torch.Tensor, predictions: torch.Tensor, encoder_values: torch.Tensor) -> float:
+def compute_iauc_metrics(
+    targets: torch.Tensor, 
+    predictions: torch.Tensor, 
+    encoder_values: torch.Tensor
+) -> dict:
     """
-    Compute the incremental Area Under the Curve (iAUC) for each sample using PyTorch operations.
+    Compute the incremental Area Under the Curve (iAUC) for each sample using PyTorch tensors.
     
     Args:
         targets: Tensor of shape (batch_size, prediction_length)
         predictions: Tensor of shape (batch_size, prediction_length)
         encoder_values: Tensor of shape (batch_size, encoder_length)
             containing the context window values
-    
-    Returns:
-        float: Mean iAUC across all samples
-    """
-    # Calculate baseline as mean of last 2 values from context window
-    baseline_mean_l2 = encoder_values[:, -2:].mean(dim=1, keepdim=True)  # (batch_size, 1)
-    baseline_mean_l3 = encoder_values[:, -3:].mean(dim=1, keepdim=True)  # (batch_size, 1)
-    baseline_min_l2 = encoder_values[:, -2:].min(dim=1, keepdim=True).values  # (batch_size, 1)
-    baseline_min_l3 = encoder_values[:, -3:].min(dim=1, keepdim=True).values  # (batch_size, 1)
-    baseline_l1 = encoder_values[:, -1:].mean(dim=1, keepdim=True)  # (batch_size, 1)
-    
-    # Compute iAUC for predictions for each baseline
-    iauc_l2_pred = _compute_iauc(predictions, baseline_mean_l2)
-    iauc_l3_pred = _compute_iauc(predictions, baseline_mean_l3)
-    iauc_min_l2_pred = _compute_iauc(predictions, baseline_min_l2)
-    iauc_min_l3_pred = _compute_iauc(predictions, baseline_min_l3)
-    iauc_l1_pred = _compute_iauc(predictions, baseline_l1)
 
-    # Compute iAUC for targets for each baseline
-    iauc_l2_ground_truth = _compute_iauc(targets, baseline_mean_l2)
-    iauc_l3_ground_truth = _compute_iauc(targets, baseline_mean_l3)
-    iauc_min_l2_ground_truth = _compute_iauc(targets, baseline_min_l2)
-    iauc_min_l3_ground_truth = _compute_iauc(targets, baseline_min_l3)
-    iauc_l1_ground_truth = _compute_iauc(targets, baseline_l1)
+    Returns:
+        dict: A dictionary with iAUC metrics for predictions and ground truth.
+    """
+    # Compute baselines using different slices/aggregations of the encoder_values.
+    baselines = {
+        "l2": encoder_values[:, -2:].mean(dim=1, keepdim=True),
+        "l3": encoder_values[:, -3:].mean(dim=1, keepdim=True),
+        "min_l2": encoder_values[:, -2:].min(dim=1, keepdim=True).values,
+        "min_l3": encoder_values[:, -3:].min(dim=1, keepdim=True).values,
+        "l1": encoder_values[:, -1:].mean(dim=1, keepdim=True)
+    }
+
+    def compute_metrics(data: torch.Tensor) -> dict:
+        """
+        Compute iAUC metrics for a given data tensor (predictions or targets) 
+        using all baselines.
         
+        Args:
+            data: Tensor for which to compute iAUC (predictions or targets).                
+        Returns:
+            A dictionary of metrics with keys like 'iauc_l2' and 'clipped_iauc_l2'.
+        """
+        metrics = {}
+        for key, baseline in baselines.items():
+            # Normal iAUC: always allow negative values.
+            metrics[f"iauc_{key}"] = _compute_iauc(
+                data, baseline, allow_negative=True
+            )
+            # Calculate the clipped version
+            metrics[f"clipped_iauc_{key}"] = _compute_iauc(
+                data, baseline, allow_negative=False
+            )
+        return metrics
+
+    # Compute metrics for predictions.
+    pred_metrics = compute_metrics(predictions)    
+    gt_metrics = compute_metrics(targets)
+    
     return {
-        "predictions": {
-            "iauc_l2": iauc_l2_pred,
-            "iauc_l3": iauc_l3_pred,
-            "iauc_min_l2": iauc_min_l2_pred,
-            "iauc_min_l3": iauc_min_l3_pred,
-            "iauc_l1": iauc_l1_pred
-        },
-        "ground_truth": {
-            "iauc_l2": iauc_l2_ground_truth,
-            "iauc_l3": iauc_l3_ground_truth,
-            "iauc_min_l2": iauc_min_l2_ground_truth,
-            "iauc_min_l3": iauc_min_l3_ground_truth,
-            "iauc_l1": iauc_l1_ground_truth
-        }
+        "predictions": pred_metrics,
+        "ground_truth": gt_metrics
     }
 
 def compute_auc_metrics(targets: torch.Tensor, predictions: torch.Tensor, encoder_values: torch.Tensor) -> float:
@@ -225,7 +239,7 @@ class PPGRMetricsCallback(pl.Callback):
         self.plot_indices = None  # Will store the random indices
         self.metric_data = {}  # Store all metrics data
         self.disable_all_plots = disable_all_plots
-        
+                
     def reset_metrics(self):
         self.all_predictions = []
         self.all_targets = []
@@ -297,8 +311,9 @@ class PPGRMetricsCallback(pl.Callback):
         
         if metric_type == 'iauc':
             metrics_to_plot = ["iauc_l2", "iauc_l3", "iauc_min_l2", "iauc_min_l3", "iauc_l1"]
-            n_rows, n_cols = 2, 3
-            figsize = (15, 10)
+            metrics_to_plot += ["clipped_iauc_l2", "clipped_iauc_l3", "clipped_iauc_min_l2", "clipped_iauc_min_l3", "clipped_iauc_l1"]
+            n_rows, n_cols = 2, 5
+            figsize = (25, 10)
             title_prefix = 'iAUC'
         elif metric_type == 'auc':
             metrics_to_plot = ["auc"]
@@ -394,14 +409,14 @@ class PPGRMetricsCallback(pl.Callback):
         raw_cgm_correlations = compute_metric_correlations(raw_cgm_metrics, self.correlation_calc_function)
 
         # Create and log scatter plots for each metric type
-        if hasattr(self, 'trainer') and self.trainer is not None:
-            for metric_type in ['iauc', 'auc', 'cgm']:
-                scatter_fig = self.plot_metric_scatter(metric_type)
-                if scatter_fig:
-                    self.trainer.logger.experiment.log({
-                        f"{self.mode}_{metric_type}_scatter": wandb.Image(scatter_fig)
-                    })
-                    plt.close(scatter_fig)
+        # if hasattr(self, 'trainer') and self.trainer is not None:
+        for metric_type in ['iauc', 'auc', 'cgm']:
+            scatter_fig = self.plot_metric_scatter(metric_type)
+            if scatter_fig:
+                self.trainer.logger.experiment.log({
+                    f"{self.mode}_{metric_type}_scatter": wandb.Image(scatter_fig)
+                })
+                plt.close(scatter_fig)
 
         # Combine the metrics into one dictionary with a prefix
         prefix = f"{self.mode}_"
@@ -926,8 +941,10 @@ def main(**kwargs):
     lr_logger = LearningRateMonitor()  # Logs the learning rate during training
 
     # Instantiate the custom iAUC callback with the validation dataloader and compute function
-    ppgr_metrics_val_callback = PPGRMetricsCallback(mode="val", disable_all_plots=config.disable_all_plots)
-    ppgr_metrics_test_callback = PPGRMetricsCallback(mode="test", disable_all_plots=config.disable_all_plots)
+    ppgr_metrics_val_callback = PPGRMetricsCallback(mode="val", 
+                                                    disable_all_plots=config.disable_all_plots)
+    ppgr_metrics_test_callback = PPGRMetricsCallback(mode="test", 
+                                                    disable_all_plots=config.disable_all_plots)
 
     # Instantiate the ModelCheckpoint callback
     checkpoint_callback = ModelCheckpoint(
