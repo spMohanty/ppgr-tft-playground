@@ -1,6 +1,10 @@
 from dataclasses import dataclass, fields
 
 import click
+import random
+import numpy as np
+import torch
+
 
 def create_click_options(config_class):
     """Create click options automatically from a dataclass's fields."""
@@ -49,3 +53,12 @@ def create_click_options(config_class):
                 )(f)
         return f
     return decorator
+
+
+def set_random_seeds(seed: int = 42):
+    """Helper function to set random seeds for reproducibility."""
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)

@@ -25,6 +25,7 @@ class Config:
     max_prediction_length: int = int(2 * 4)  # prediction horizon (2.5 hours)
     validation_percentage: float = 0.1
     test_percentage: float = 0.1
+    dataset_cache_dir: str = "/scratch/mohanty/food/ppgr/datasets-cache"
     no_data_cache: bool = False
 
     # DataLoader parameters
