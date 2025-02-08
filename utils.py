@@ -1,76 +1,96 @@
-from dataclasses import dataclass, fields
-
-import click
-import random
-import numpy as np
-import torch
+#!/usr/bin/env python
+"""
+Utility module for experiment setup including:
+    - Automatic Click options creation from dataclass configurations.
+    - Random seed setting for reproducibility.
+    - Symmetric quantile calculation.
+    - Experiment naming.
+    - Initialization and configuration override for Weights & Biases.
+"""
 
 import os
-from loguru import logger
+import random
+from typing import Any, Callable, List, Type
 
+import click
+import numpy as np
+import torch
 import wandb
-
-from config import Config
+from dataclasses import MISSING, fields
+from loguru import logger
 from lightning.pytorch.loggers import WandbLogger
 
-def create_click_options(config_class):
-    """Create click options automatically from a dataclass's fields."""
-    def decorator(f):
-        # Reverse the fields so the decorators are applied in the correct order
-        for field in reversed(fields(config_class)):
-            # Get the field type and default value
-            param_type = field.type
-            default_value = field.default
-            
-            # Convert type hints to click types
-            type_mapping = {
-                str: str,
-                int: int,
-                float: float,
-                bool: bool
-            }
-            param_type = type_mapping.get(param_type, str)
-            
-            # Create the click option with both hyphen and underscore versions
+from config import Config
+
+
+def create_click_options(config_class: Type[Any]) -> Callable:
+    """
+    Create a decorator that adds Click options based on the fields
+    of a dataclass configuration.
+
+    Args:
+        config_class: A dataclass type containing configuration parameters.
+
+    Returns:
+        A decorator that can be applied to a Click command function.
+    """
+    # Mapping for converting dataclass types to click types
+    type_mapping = {str: str, int: int, float: float, bool: bool}
+
+    def decorator(f: Callable) -> Callable:
+        # Iterate in reverse so that decorators are applied in the correct order.
+        for field in reversed(list(fields(config_class))):
+            # Determine the Click parameter type.
+            field_type = type_mapping.get(field.type, str)
+
+            # Determine default behavior; if no default is provided, mark as required.
+            if field.default is MISSING:
+                option_kwargs = {"required": True, "help": "Required parameter"}
+            else:
+                option_kwargs = {
+                    "default": field.default,
+                    "show_default": True,
+                    "help": f"Default: {field.default}",
+                }
+
+            # Create both hyphenated and underscored option names.
             hyphen_name = f"--{field.name.replace('_', '-')}"
             underscore_name = f"--{field.name}"
-            
-            # Add aliases for specific parameters
-            aliases = []
+            option_names = [hyphen_name, underscore_name]
+
+            # Add any aliases if applicable.
             if field.name == "debug_mode":
-                aliases.append("--debug")
-            
-            # Combine all option names
-            option_names = [hyphen_name, underscore_name] + aliases
-            
-            if param_type == bool:
-                # Handle boolean flags differently
-                f = click.option(
-                    *option_names,
-                    is_flag=True,
-                    default=default_value,
-                    help=f"Default: {default_value}"
-                )(f)
+                option_names.append("--debug")
+
+            if field_type == bool:
+                # For booleans, use is_flag.
+                option_kwargs["is_flag"] = True
+                # Remove default from help if needed because click shows flags differently.
+                option_kwargs.pop("default", None)
+                f = click.option(*option_names, **option_kwargs)(f)
             else:
-                f = click.option(
-                    *option_names,
-                    type=param_type,
-                    default=default_value,
-                    help=f"Default: {default_value}"
-                )(f)
+                f = click.option(*option_names, type=field_type, **option_kwargs)(f)
         return f
+
     return decorator
 
 
-def set_random_seeds(seed: int = 42):
-    """Helper function to set random seeds for reproducibility."""
+def set_random_seeds(seed: int = 42) -> None:
+    """
+    Set random seeds for Python, NumPy, and PyTorch for reproducibility.
+
+    Args:
+        seed: The seed value to use (default is 42).
+    """
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
+    logger.info("Random seeds set to %d", seed)
 
-def calculate_symmetric_quantiles(num_quantiles: int) -> list:
+
+def calculate_symmetric_quantiles(num_quantiles: int) -> List[float]:
     """
     Calculate symmetric quantile levels given the desired total number of quantiles.
 
@@ -79,34 +99,45 @@ def calculate_symmetric_quantiles(num_quantiles: int) -> list:
       evenly spaced between 0 and 0.5 and the upper half mirrored accordingly.
     - For an even number, returns symmetric pairs around 0.5.
 
-    Parameters:
-        num_quantiles (int): The total number of quantiles (must be >= 1).
+    Args:
+        num_quantiles: The total number of quantiles (must be >= 1).
 
     Returns:
-        list of float: Sorted quantile values between 0 and 1.
+        A sorted list of quantile values between 0 and 1.
+    
+    Raises:
+        ValueError: If num_quantiles is less than 1.
     """
     if num_quantiles < 1:
         raise ValueError("num_quantiles must be at least 1")
     if num_quantiles == 1:
         return [0.5]
-    
-    # Calculate the number of quantiles in the lower half.
-    half = num_quantiles // 2
-    
-    # Generate lower quantiles in the open interval (0, 0.5).
-    # We use endpoint=False to avoid including zero, and then slice off the first element.
-    lower_quantiles = np.linspace(0, 0.5, num=half + 1, endpoint=False)[1:]
-    
-    # For an odd number of quantiles, include the median (0.5).
+
+    half_count = num_quantiles // 2
+
+    # Generate lower quantiles in the open interval (0, 0.5)
+    lower_quantiles = np.linspace(0, 0.5, num=half_count + 1, endpoint=False)[1:]
+
     if num_quantiles % 2 == 1:
+        # Odd: include the median (0.5) and mirror lower quantiles.
         quantiles = np.concatenate((lower_quantiles, [0.5], 1.0 - lower_quantiles[::-1]))
     else:
+        # Even: mirror the lower quantiles.
         quantiles = np.concatenate((lower_quantiles, 1.0 - lower_quantiles[::-1]))
-    
+
     return quantiles.tolist()
 
+
 def setup_experiment_name(config: Config) -> str:
-    """Construct an experiment name based on configuration hyperparameters."""
+    """
+    Construct an experiment name based on configuration hyperparameters.
+
+    Args:
+        config: The configuration object with hyperparameters.
+
+    Returns:
+        A string representing the experiment name.
+    """
     base_name = config.experiment_name
     experiment_name_parts = [
         base_name,
@@ -115,37 +146,55 @@ def setup_experiment_name(config: Config) -> str:
         f"hcs{config.hidden_continuous_size}",
         f"d{int(config.dropout * 100)}",
         f"lr{config.learning_rate:.0e}",
-        f"bs{config.batch_size}"
+        f"bs{config.batch_size}",
     ]
-    return "-".join(experiment_name_parts)
+    experiment_name = "-".join(experiment_name_parts)
+    logger.debug("Experiment name constructed: %s", experiment_name)
+    return experiment_name
 
 
 def initialize_wandb(config: Config, experiment_name: str) -> WandbLogger:
-    """Initialize wandb and return a WandbLogger for Lightning."""
+    """
+    Initialize Weights & Biases (wandb) and return a Lightning WandbLogger.
+
+    This function also sets the WANDB_DIR environment variable and logs
+    the wandb run directory.
+
+    Args:
+        config: The configuration object.
+        experiment_name: The name to assign to the experiment/run.
+
+    Returns:
+        An instance of WandbLogger.
+    """
     os.makedirs(config.wandb_dir, exist_ok=True)
     os.environ["WANDB_DIR"] = config.wandb_dir
-    logger.info(f"WANDB_DIR: {os.environ['WANDB_DIR']}")
+    logger.info("WANDB_DIR set to: %s", os.environ["WANDB_DIR"])
 
+    # Initialize the wandb run.
     wandb.init(
         project=config.wandb_project,
         name=experiment_name,
         dir=config.wandb_dir,
         settings=wandb.Settings(start_method="thread")
     )
-    logger.info(f"Wandb directory: {wandb.run.dir}")
+    logger.info("Initialized wandb run with directory: %s", wandb.run.dir)
 
-    return WandbLogger(
-        project=config.wandb_project,
-        name=experiment_name
-    )
+    return WandbLogger(project=config.wandb_project, name=experiment_name)
 
 
 def override_config_from_wandb(config: Config) -> None:
     """
-    When running a sweep, wandb.config will contain the current run's hyperparameters.
-    Override default config values if they exist.
+    Override configuration values with wandb configuration parameters during sweeps.
+
+    If wandb.run exists, this function updates the configuration parameters from
+    wandb.config and renames the wandb run accordingly.
+
+    Args:
+        config: The configuration object to update.
     """
-    if hasattr(wandb, 'config') and wandb.run is not None:
+    if hasattr(wandb, 'run') and wandb.run is not None:
+        # Update configuration fields if present in wandb.config.
         config.learning_rate = wandb.config.get("learning_rate", config.learning_rate)
         config.hidden_size = wandb.config.get("hidden_size", config.hidden_size)
         config.attention_head_size = wandb.config.get("attention_head_size", config.attention_head_size)
@@ -154,7 +203,35 @@ def override_config_from_wandb(config: Config) -> None:
         config.max_epochs = wandb.config.get("max_epochs", config.max_epochs)
         config.batch_size = wandb.config.get("batch_size", config.batch_size)
 
-        # Update experiment name based on sweep parameters.
+        # Update the experiment name based on the new configuration.
         new_experiment_name = setup_experiment_name(config)
         wandb.run.name = new_experiment_name
         wandb.run.save()
+        logger.info("Configuration overridden from wandb. New experiment name: %s", new_experiment_name)
+    else:
+        logger.warning("wandb.run is not available. Config not overridden.")
+
+
+# Optional: An example entry point for testing these utilities.
+if __name__ == "__main__":
+    # Example usage (requires a proper Config definition in config.py)
+    try:
+        # Create a dummy config if needed for testing.
+        config = Config()  # Assumes that Config is a dataclass with defaults.
+        set_random_seeds(config.seed if hasattr(config, "seed") else 42)
+        experiment_name = setup_experiment_name(config)
+        logger.info("Experiment Name: %s", experiment_name)
+
+        # Example: Calculate quantiles
+        quantiles = calculate_symmetric_quantiles(5)
+        logger.info("Calculated quantiles: %s", quantiles)
+
+        # Initialize wandb if configured.
+        wb_logger = initialize_wandb(config, experiment_name)
+        logger.info("Initialized WandbLogger: %s", wb_logger)
+
+        # Optionally override configuration from wandb.
+        override_config_from_wandb(config)
+
+    except Exception as e:
+        logger.exception("An error occurred: %s", e)
