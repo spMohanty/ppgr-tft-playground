@@ -278,14 +278,15 @@ def create_dataloaders(
     """
     Create DataLoader objects from TimeSeriesDataSet objects.
     """
+    pin_memory = torch.cuda.is_available()
     train_loader = training_dataset.to_dataloader(
-        train=True, batch_size=batch_size, num_workers=num_workers, shuffle=shuffle_train
+        train=True, batch_size=batch_size, num_workers=num_workers, shuffle=shuffle_train, pin_memory=pin_memory, persistent_workers=True
     )
     val_loader = validation_dataset.to_dataloader(
-        train=False, batch_size=batch_size * 10, num_workers=num_workers, shuffle=shuffle_val
+        train=False, batch_size=batch_size * 10, num_workers=num_workers, shuffle=shuffle_val, pin_memory=pin_memory, persistent_workers=True
     )
     test_loader = test_dataset.to_dataloader(
-        train=False, batch_size=batch_size * 10, num_workers=num_workers, shuffle=shuffle_test
+        train=False, batch_size=batch_size * 10, num_workers=num_workers, shuffle=shuffle_test, pin_memory=pin_memory, persistent_workers=True 
     )
     
     return train_loader, val_loader, test_loader

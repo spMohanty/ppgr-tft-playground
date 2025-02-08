@@ -119,8 +119,12 @@ class PPGRMetricsCallback(pl.Callback):
     def _process_batch(self, pl_module, batch, outputs):
         past_data, _ = batch
         predictions = outputs["prediction"]
-        median_quantile_index = 3  # Use median quantile for point forecasts.
-        point_forecast = predictions[:, :, median_quantile_index]
+        
+        if predictions.shape[-1] == 1:
+            point_forecast = predictions[:, :, 0]
+        else:
+            median_quantile_index = 3  # Use median quantile for point forecasts.
+            point_forecast = predictions[:, :, median_quantile_index]
         self.all_predictions.append(point_forecast)
         self.all_targets.append(past_data["decoder_target"])
         self.all_encoder_values.append(past_data["encoder_target"])
@@ -201,8 +205,8 @@ class PPGRMetricsCallback(pl.Callback):
             if idx >= len(axes):
                 break
 
-            pred = metrics_subset["predictions"][metric].cpu().numpy()
-            true = metrics_subset["ground_truth"][metric].cpu().numpy()
+            pred = metrics_subset["predictions"][metric].detach().cpu().numpy()
+            true = metrics_subset["ground_truth"][metric].detach().cpu().numpy()
 
             # Random subsample if too many points
             if len(pred) > max_points:
@@ -320,8 +324,8 @@ if __name__ == "__main__":
         def plot_prediction(self, past_data, prediction_outputs, idx):
             # Create a dummy plot for the given index.
             fig, ax = plt.subplots()
-            encoder_values = past_data["encoder_target"][idx].cpu().numpy()
-            decoder_target = past_data["decoder_target"][idx].cpu().numpy()
+            encoder_values = past_data["encoder_target"][idx].detach().cpu().numpy()
+            decoder_target = past_data["decoder_target"][idx].detach().cpu().numpy()
             ax.plot(encoder_values, label="encoder_target")
             ax.plot(decoder_target, label="decoder_target")
             ax.legend()

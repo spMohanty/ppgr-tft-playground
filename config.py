@@ -26,8 +26,8 @@ class Config:
     no_data_cache: bool = False
 
     # DataLoader parameters
-    batch_size: int = 256
-    num_workers: int = 4
+    batch_size: int = 256 
+    num_workers: int = 8
 
     # Model hyperparameters
     learning_rate: float = 1e-2
@@ -39,6 +39,8 @@ class Config:
     # Trainer parameters
     max_epochs: int = 200  # Early stopping will likely kick in before this.
     gradient_clip_val: float = 0.1
+    val_check_interval: float = 0.25
+    loss: str = "RMSE" # "QuantileLoss" or "RMSE" or "Quantile+RMSE"
 
     # Early stopping parameters
     early_stop_monitor_metric: str = "val_loss"
