@@ -293,3 +293,71 @@ class PPGRMetricsCallback(pl.Callback):
     def on_test_epoch_end(self, trainer, pl_module):
         if self.mode == "test":
             self._handle_epoch_end(trainer, pl_module)
+
+if __name__ == "__main__":
+    # Define dummy classes to mimic Trainer and Module behavior.
+    class DummyExperiment:
+        def log(self, log_dict):
+            print("Experiment log:", log_dict)
+
+    class DummyLogger:
+        def __init__(self):
+            self.experiment = DummyExperiment()
+
+    class DummyTrainer:
+        def __init__(self):
+            self.logger = DummyLogger()
+
+    class DummyModule:
+        def __init__(self):
+            # These lists mimic the full outputs stored during training/validation.
+            self.validation_batch_full_outputs = []
+            self.test_batch_full_outputs = []
+
+        def log(self, key, value, prog_bar, sync_dist):
+            print(f"Logging {key}: {value} (prog_bar={prog_bar}, sync_dist={sync_dist})")
+
+        def plot_prediction(self, past_data, prediction_outputs, idx):
+            # Create a dummy plot for the given index.
+            fig, ax = plt.subplots()
+            encoder_values = past_data["encoder_target"][idx].cpu().numpy()
+            decoder_target = past_data["decoder_target"][idx].cpu().numpy()
+            ax.plot(encoder_values, label="encoder_target")
+            ax.plot(decoder_target, label="decoder_target")
+            ax.legend()
+            ax.set_title(f"Sample {idx} Prediction Plot")
+            return fig
+
+    # Create synthetic data for a single batch.
+    batch_size = 8
+    encoder_length = 10
+    prediction_length = 5
+    num_quantiles = 7  # Ensures index 3 (the median) exists
+
+    # Create dummy past_data with encoder and decoder targets.
+    past_data = {
+        "encoder_target": torch.randn(batch_size, encoder_length),
+        "decoder_target": torch.randn(batch_size, prediction_length)
+    }
+    future_data = {}  # Dummy future data (not used in metrics)
+    batch = (past_data, future_data)
+
+    # Create dummy outputs with predictions of shape (batch_size, prediction_length, num_quantiles).
+    predictions = torch.randn(batch_size, prediction_length, num_quantiles)
+    outputs = {"prediction": predictions}
+
+    # Instantiate the dummy module and simulate storing a batch output.
+    dummy_module = DummyModule()
+    dummy_module.validation_batch_full_outputs.append((None, outputs))
+
+    # Instantiate the dummy trainer.
+    trainer = DummyTrainer()
+
+    # Instantiate the callback (set num_plots to 3 for brevity).
+    callback = PPGRMetricsCallback(mode="val", num_plots=3, disable_all_plots=False)
+
+    # Simulate processing a validation batch.
+    callback.on_validation_batch_end(trainer, dummy_module, outputs, batch, batch_idx=0)
+
+    # Simulate end-of-epoch processing (which computes and logs metrics and plots).
+    callback.on_validation_epoch_end(trainer, dummy_module)
