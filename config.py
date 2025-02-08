@@ -1,6 +1,8 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from rich import print as rprint
 from rich.pretty import pprint
+
+from typing import Tuple
 
 @dataclass
 class Config:
@@ -30,6 +32,7 @@ class Config:
     num_workers: int = 8
 
     # Model hyperparameters
+    num_quantiles: int = 7 # 7 or 13
     learning_rate: float = 1e-3
     hidden_size: int = 256
     lstm_layers: int = 1
@@ -45,7 +48,7 @@ class Config:
     reduce_lr_on_plateau_reduction: float = 10
     reduce_lr_on_plateau_patience: int = 3
     
-    loss: str = "QuantileLoss" # "QuantileLoss" or "RMSE"
+    loss: str = "QuantileLoss" # "QuantileLoss" or "ApproximateCRPS" or "RMSE"
 
     # Early stopping parameters
     early_stop_monitor_metric: str = "val_loss"
@@ -67,4 +70,6 @@ class Config:
 if __name__ == "__main__":
     config = Config()
     rprint("[bold blue]Experiment Configuration:[/bold blue]")
+    pprint(config)
+    config.quantiles = "asomething"
     pprint(config)
