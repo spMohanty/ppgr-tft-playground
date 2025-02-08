@@ -30,8 +30,9 @@ class Config:
     num_workers: int = 8
 
     # Model hyperparameters
-    learning_rate: float = 1e-2
+    learning_rate: float = 1e-3
     hidden_size: int = 256
+    lstm_layers: int = 1
     attention_head_size: int = 4
     dropout: float = 0.15
     hidden_continuous_size: int = 128
@@ -40,10 +41,11 @@ class Config:
     max_epochs: int = 200  # Early stopping will likely kick in before this.
     gradient_clip_val: float = 0.1
     val_check_interval: float = 0.25
+    lr_weight_decay: float = 0.05
     reduce_lr_on_plateau_reduction: float = 10
     reduce_lr_on_plateau_patience: int = 3
     
-    loss: str = "RMSE" # "QuantileLoss" or "RMSE" or "Quantile+RMSE"
+    loss: str = "QuantileLoss" # "QuantileLoss" or "RMSE"
 
     # Early stopping parameters
     early_stop_monitor_metric: str = "val_loss"

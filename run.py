@@ -84,7 +84,11 @@ def build_callbacks(config: Config) -> (list, PPGRMetricsCallback):
     )
     rich_model_summary = RichModelSummary()
     rich_progress_bar = RichProgressBar()
-    lr_logger = LearningRateMonitor(logging_interval="step")
+    lr_logger = LearningRateMonitor(
+        logging_interval="step",
+        log_momentum=True,
+        log_weight_decay=True
+        )
     ppgr_metrics_val_callback = PPGRMetricsCallback(mode="val", disable_all_plots=config.disable_all_plots)
     ppgr_metrics_test_callback = PPGRMetricsCallback(mode="test", disable_all_plots=config.disable_all_plots)
 
@@ -130,8 +134,6 @@ def build_loss(config: Config) -> torch.nn.Module:
         return QuantileLoss()
     elif config.loss == "RMSE":
         return RMSE()
-    elif config.loss == "Quantile+RMSE":
-        return MultiLoss(metrics = [QuantileLoss(), RMSE()])
     else:
         raise ValueError(f"Invalid loss function: {config.loss}")
 
@@ -183,9 +185,11 @@ def main(**kwargs):
     tft_model = PPGRTemporalFusionTransformer.from_dataset(
         train_loader.dataset,
         learning_rate=config.learning_rate,
+        weight_decay=config.lr_weight_decay,
         reduce_on_plateau_reduction=config.reduce_lr_on_plateau_reduction,
         reduce_on_plateau_patience=config.reduce_lr_on_plateau_patience,
         hidden_size=config.hidden_size,
+        lstm_layers=config.lstm_layers,
         attention_head_size=config.attention_head_size,
         dropout=config.dropout,
         hidden_continuous_size=config.hidden_continuous_size,
