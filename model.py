@@ -31,97 +31,97 @@ from lightning.pytorch.loggers import TensorBoardLogger
 from pytorch_forecasting import Baseline, TemporalFusionTransformer, TimeSeriesDataSet
 
 
+import torch
+from torch import nn
+import math
+
+from pytorch_forecasting.utils import create_mask
+
 class PPGRTemporalFusionTransformer(TemporalFusionTransformer):
-    """
-    Custom Temporal Fusion Transformer with additional functionalities.
-    
-    This model extends the pytorch_forecasting TemporalFusionTransformer by
-    providing custom validation and test step handling, as well as a hook for a
-    post-training mode (currently not implemented).
-    """
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+    def __init__(
+        self,
+        n_head: int = 4,
+        num_encoder_layers: int = 8,
+        num_decoder_layers: int = 8,
+        dim_feedforward: int = 512,
+        # Add any new hyperparameters you want for your transformer
+        # plus the ones from the parent class
+        **kwargs,
+    ):
+        """
+        A variant of TemporalFusionTransformer that replaces the LSTM encoder/decoder
+        with a PyTorch nn.TransformerEncoder and nn.TransformerDecoder.
+
+        Args:
+            n_head (int): number of attention heads in the transformer
+            num_encoder_layers (int): number of Transformer encoder layers
+            num_decoder_layers (int): number of Transformer decoder layers
+            dim_feedforward (int): size of the feed-forward layers in the transformer
+            **kwargs: same arguments as TemporalFusionTransformer
+        """
+        super().__init__(**kwargs)
         
-        # Containers to store full outputs for validation and test steps.
+        # Remove the LSTMs
+        del self.lstm_encoder
+        del self.lstm_decoder
+
+        # Instead, create transformer layers:
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=self.hparams.hidden_size,
+            nhead=n_head,
+            dim_feedforward=dim_feedforward,
+            dropout=self.hparams.dropout,
+            batch_first=True,  # If you're using PyTorch 1.9+, we can simplify
+        )
+        self.transformer_encoder = nn.TransformerEncoder(
+            encoder_layer, num_layers=num_encoder_layers
+        )
+
+        decoder_layer = nn.TransformerDecoderLayer(
+            d_model=self.hparams.hidden_size,
+            nhead=n_head,
+            dim_feedforward=dim_feedforward,
+            dropout=self.hparams.dropout,
+            batch_first=True,
+        )
+        self.transformer_decoder = nn.TransformerDecoder(
+            decoder_layer, num_layers=num_decoder_layers
+        )
+        
+        # Setup variables needed for the Metrics Callback
         self.validation_batch_full_outputs = []
         self.test_batch_full_outputs = []
         
-        # Flag for post-training mode. (Not implemented in this version)
-        self.post_train_mode = False
-        
-        # Uncomment and define your custom attention layer if needed:
-        # self.multihead_attn = PPGRVectorizedInterpretableMultiHeadAttention(
-        #     d_model=self.hparams.hidden_size,
-        #     n_head=self.hparams.attention_head_size,
-        #     dropout=self.hparams.dropout,
-        # )
 
-    def forward(self, x: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+    def forward(self, x: dict) -> dict:
         """
-        Forward pass through the model.
-        
-        If post_train_mode is False, it delegates to the parent class's forward method.
-        Otherwise, it is expected to use a custom output layer (not implemented).
-        """
-        # Get backbone outputs
-        (
-            backbone_output,
-            attn_output_weights,
-            max_encoder_length,
-            static_variable_selection,
-            encoder_sparse_weights,
-            decoder_sparse_weights,
-            decoder_lengths,
-            encoder_lengths,
-        ) = self._forward_backbone(x)
-    
-        if not self.post_train_mode:
-            # Use the standard output layer provided by the parent class.
-            return super().forward(x)
-        else:
-            # Custom post-training mode logic goes here (not yet implemented).
-            raise NotImplementedError("Post-train mode not implemented")
-
-    def _forward_backbone(self, x: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
-        """
-        Processes the input through embeddings, LSTM encoder/decoder, static enrichment,
-        and attention mechanisms to produce the backbone representation.
-        
-        Args:
-            x (Dict[str, torch.Tensor]): Dictionary containing model inputs.
-            
-        Returns:
-            Tuple containing:
-                - backbone_output: The output from the temporal fusion decoder.
-                - attn_output_weights: Attention weights from the multihead attention.
-                - max_encoder_length: Maximum length of the encoder inputs.
-                - static_variable_selection: Weights from static variable selection.
-                - encoder_sparse_weights: Weights from encoder variable selection.
-                - decoder_sparse_weights: Weights from decoder variable selection.
-                - decoder_lengths: Lengths of the decoder sequences.
-                - encoder_lengths: Lengths of the encoder sequences.
+        Forward pass that swaps out LSTM for a transformer encoder-decoder.
         """
         encoder_lengths = x["encoder_lengths"]
         decoder_lengths = x["decoder_lengths"]
-        
-        # Concatenate encoder and decoder categorical and continuous features along time dimension.
         x_cat = torch.cat([x["encoder_cat"], x["decoder_cat"]], dim=1)
         x_cont = torch.cat([x["encoder_cont"], x["decoder_cont"]], dim=1)
-        timesteps = x_cont.size(1)  # Total time steps (encoder + decoder)
+        timesteps = x_cont.size(1)
         max_encoder_length = int(encoder_lengths.max())
-        
-        # Create input embeddings for categorical features.
-        input_vectors = self.input_embeddings(x_cat)
-        input_vectors.update({
-            name: x_cont[..., idx].unsqueeze(-1)
-            for idx, name in enumerate(self.hparams.x_reals)
-            if name in self.reals
-        })
 
-        # Static embeddings and variable selection.
+        # embeddings
+        input_vectors = self.input_embeddings(x_cat)
+        input_vectors.update(
+            {
+                name: x_cont[..., idx].unsqueeze(-1)
+                for idx, name in enumerate(self.hparams.x_reals)
+                if name in self.reals
+            }
+        )
+
+        # static variable selection
         if len(self.static_variables) > 0:
-            static_embedding = {name: input_vectors[name][:, 0] for name in self.static_variables}
-            static_embedding, static_variable_selection = self.static_variable_selection(static_embedding)
+            static_embedding = {
+                name: input_vectors[name][:, 0] for name in self.static_variables
+            }
+            static_embedding, static_variable_selection = self.static_variable_selection(
+                static_embedding
+            )
         else:
             static_embedding = torch.zeros(
                 (x_cont.size(0), self.hparams.hidden_size),
@@ -136,87 +136,130 @@ class PPGRTemporalFusionTransformer(TemporalFusionTransformer):
             self.static_context_variable_selection(static_embedding), timesteps
         )
 
-        # Process encoder and decoder variables separately.
+        # encoder variable selection
         embeddings_varying_encoder = {
             name: input_vectors[name][:, :max_encoder_length]
             for name in self.encoder_variables
         }
-        embeddings_varying_encoder, encoder_sparse_weights = self.encoder_variable_selection(
-            embeddings_varying_encoder,
-            static_context_variable_selection[:, :max_encoder_length],
+        embeddings_varying_encoder, encoder_sparse_weights = (
+            self.encoder_variable_selection(
+                embeddings_varying_encoder,
+                static_context_variable_selection[:, :max_encoder_length],
+            )
         )
 
+        # decoder variable selection
         embeddings_varying_decoder = {
             name: input_vectors[name][:, max_encoder_length:]
             for name in self.decoder_variables
         }
-        embeddings_varying_decoder, decoder_sparse_weights = self.decoder_variable_selection(
-            embeddings_varying_decoder,
-            static_context_variable_selection[:, max_encoder_length:],
+        embeddings_varying_decoder, decoder_sparse_weights = (
+            self.decoder_variable_selection(
+                embeddings_varying_decoder,
+                static_context_variable_selection[:, max_encoder_length:],
+            )
         )
 
-        # Initialize LSTM states using static context.
-        input_hidden = self.static_context_initial_hidden_lstm(static_embedding).expand(
-            self.hparams.lstm_layers, -1, -1
-        )
-        input_cell = self.static_context_initial_cell_lstm(static_embedding).expand(
-            self.hparams.lstm_layers, -1, -1
+        # --------------------------------------------------------------------
+        # Replace LSTM with Transformer
+        # --------------------------------------------------------------------
+        # We have "embeddings_varying_encoder" for the historical part (B x T_enc x hidden)
+        # and "embeddings_varying_decoder" for the future part (B x T_dec x hidden).
+
+        # Construct padding masks for the transformer (True = ignore)
+        # We want shape: (B, T_enc) and (B, T_dec)
+        encoder_padding_mask = create_mask(
+            max_encoder_length, encoder_lengths
+        )  # True where "padding"
+        decoder_padding_mask = create_mask(
+            embeddings_varying_decoder.shape[1], decoder_lengths
         )
 
-        # Run the encoder LSTM.
-        encoder_output, (hidden, cell) = self.lstm_encoder(
-            embeddings_varying_encoder,
-            (input_hidden, input_cell),
-            lengths=encoder_lengths,
-            enforce_sorted=False,
+        # Optionally create a causal mask for the decoder:
+        # Typically, the nn.TransformerDecoder by default uses a causal mask
+        # if you pass `tgt_mask`, but you might prefer to let the model attend to
+        # all known future steps (the original TFT's "causal_attention" param).
+        # For simplicity, let's do standard causal masking:
+        T_dec = embeddings_varying_decoder.shape[1]
+        causal_mask = nn.Transformer().generate_square_subsequent_mask(T_dec).to(
+            embeddings_varying_decoder.device
         )
 
-        # Run the decoder LSTM.
-        decoder_output, _ = self.lstm_decoder(
-            embeddings_varying_decoder,
-            (hidden, cell),
-            lengths=decoder_lengths,
-            enforce_sorted=False,
-        )
+        # Pass through the encoder
+        encoder_output = self.transformer_encoder(
+            src=embeddings_varying_encoder,  # B x T_enc x hidden
+            src_key_padding_mask=encoder_padding_mask,  # B x T_enc
+        )  # -> B x T_enc x hidden
 
-        # Apply skip connections over LSTM outputs.
+        # Pass through the decoder
+        decoder_output = self.transformer_decoder(
+            tgt=embeddings_varying_decoder,        # B x T_dec x hidden
+            memory=encoder_output,                 # B x T_enc x hidden
+            tgt_mask=causal_mask,                  # T_dec x T_dec, standard
+            tgt_key_padding_mask=decoder_padding_mask,  # B x T_dec
+            memory_key_padding_mask=encoder_padding_mask,  # B x T_enc
+        )  # -> B x T_dec x hidden
+
+        # --------------------------------------------------------------------
+        # Now mimic the skip connections that were used for LSTM.
+        # Instead of post_lstm_gate_encoder/decoder, we have only one decoder output.
+        # But let's do something similar:
+        # --------------------------------------------------------------------
+
         lstm_output_encoder = self.post_lstm_gate_encoder(encoder_output)
-        lstm_output_encoder = self.post_lstm_add_norm_encoder(lstm_output_encoder, embeddings_varying_encoder)
+        lstm_output_encoder = self.post_lstm_add_norm_encoder(
+            lstm_output_encoder, embeddings_varying_encoder
+        )
+
         lstm_output_decoder = self.post_lstm_gate_decoder(decoder_output)
-        lstm_output_decoder = self.post_lstm_add_norm_decoder(lstm_output_decoder, embeddings_varying_decoder)
+        lstm_output_decoder = self.post_lstm_add_norm_decoder(
+            lstm_output_decoder, embeddings_varying_decoder
+        )
+
+        # Combine them just like in the parent
         lstm_output = torch.cat([lstm_output_encoder, lstm_output_decoder], dim=1)
 
-        # Static enrichment.
+        # static enrichment
         static_context_enrichment = self.static_context_enrichment(static_embedding)
         attn_input = self.static_enrichment(
             lstm_output,
             self.expand_static_context(static_context_enrichment, timesteps),
         )
 
-        # Attention mechanism.
+        # multihead attn over entire sequence
         attn_output, attn_output_weights = self.multihead_attn(
-            q=attn_input[:, max_encoder_length:],  # Query only for prediction time steps.
+            q=attn_input[:, max_encoder_length:],  # only for predictions
             k=attn_input,
             v=attn_input,
-            mask=self.get_attention_mask(encoder_lengths=encoder_lengths, decoder_lengths=decoder_lengths),
+            mask=self.get_attention_mask(
+                encoder_lengths=encoder_lengths, decoder_lengths=decoder_lengths
+            ),
         )
 
-        # Apply skip connection over attention output.
-        attn_output = self.post_attn_gate_norm(attn_output, attn_input[:, max_encoder_length:])
+        attn_output = self.post_attn_gate_norm(
+            attn_output, attn_input[:, max_encoder_length:]
+        )
         output = self.pos_wise_ff(attn_output)
+        output = self.pre_output_gate_norm(
+            output, lstm_output[:, max_encoder_length:]
+        )
 
-        # Final skip connection before the output layer.
-        backbone_output = self.pre_output_gate_norm(output, lstm_output[:, max_encoder_length:])
+        # Final linear
+        if self.n_targets > 1:
+            output = [layer(output) for layer in self.output_layer]
+        else:
+            output = self.output_layer(output)
 
-        return (
-            backbone_output,
-            attn_output_weights,
-            max_encoder_length,
-            static_variable_selection,
-            encoder_sparse_weights,
-            decoder_sparse_weights,
-            decoder_lengths,
-            encoder_lengths,
+        # Return in same dictionary format
+        return self.to_network_output(
+            prediction=self.transform_output(output, target_scale=x["target_scale"]),
+            encoder_attention=attn_output_weights[..., :max_encoder_length],
+            decoder_attention=attn_output_weights[..., max_encoder_length:],
+            static_variables=static_variable_selection,
+            encoder_variables=encoder_sparse_weights,
+            decoder_variables=decoder_sparse_weights,
+            decoder_lengths=decoder_lengths,
+            encoder_lengths=encoder_lengths,
         )
 
     def validation_step(self, batch, batch_idx):

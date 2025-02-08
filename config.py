@@ -32,28 +32,30 @@ class Config:
     num_workers: int = 8
 
     # Model hyperparameters
-    num_quantiles: int = 7 # 7 or 13
-    learning_rate: float = 1e-3
+    learning_rate: float = 1e-4
+    
     hidden_size: int = 256
     lstm_layers: int = 1
-    attention_head_size: int = 4
     dropout: float = 0.15
+    num_quantiles: int = 7 # 7 or 13
+    attention_head_size: int = 4
     hidden_continuous_size: int = 128
 
     # Trainer parameters
-    max_epochs: int = 200  # Early stopping will likely kick in before this.
-    gradient_clip_val: float = 0.1
-    val_check_interval: float = 0.25
+    max_epochs: int = 100  # Early stopping will likely kick in before this.
+    gradient_clip_val: float = 0.05
     lr_weight_decay: float = 0.05
     reduce_lr_on_plateau_reduction: float = 10
     reduce_lr_on_plateau_patience: int = 3
+    val_check_interval: float = 0.25
+    trainer_log_interval: int = 1
     
     loss: str = "QuantileLoss" # "QuantileLoss" or "ApproximateCRPS" or "RMSE"
 
     # Early stopping parameters
     early_stop_monitor_metric: str = "val_loss"
     early_stop_monitor_metric_mode: str = "min"
-    early_stop_patience: int = 10
+    early_stop_patience: int = 100 # REMOVE THIS LATER
     early_stop_min_delta: float = 1e-4
 
     # Checkpoint parameters

@@ -12,11 +12,16 @@ from lightning.pytorch.loggers import WandbLogger
 
 from config import Config
 from datasets import get_time_series_dataloaders
-from model import PPGRTemporalFusionTransformer
+
+#from model import PPGRTemporalFusionTransformer
+from model_v1 import PPGRTemporalFusionTransformer
+
 from metrics import PPGRMetricsCallback
 from loss import build_loss
 from utils import create_click_options, setup_experiment_name, initialize_wandb, override_config_from_wandb
 from utils import set_random_seeds
+
+
 
 def build_callbacks(config: Config) -> (list, PPGRMetricsCallback):
     """Construct and return all Lightning callbacks along with the test metrics callback."""
@@ -130,7 +135,7 @@ def main(**kwargs):
         hidden_continuous_size=config.hidden_continuous_size,
         output_size=config.num_quantiles,
         loss=build_loss(config),
-        log_interval=5,  # Adjust logging frequency as needed.
+        log_interval=config.trainer_log_interval,
         optimizer="ranger",
     )
     logger.info(f"Number of parameters in network: {tft_model.size() / 1e3:.1f}k")
