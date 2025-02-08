@@ -154,7 +154,7 @@ def main(**kwargs):
 
     # In debug mode, run only one epoch.
     if config.debug_mode:
-        config.max_epochs = 1
+        config.max_epochs = 30
 
     # Override config parameters if running a sweep.
     override_config_from_wandb(config)
@@ -183,6 +183,8 @@ def main(**kwargs):
     tft_model = PPGRTemporalFusionTransformer.from_dataset(
         train_loader.dataset,
         learning_rate=config.learning_rate,
+        reduce_on_plateau_reduction=config.reduce_lr_on_plateau_reduction,
+        reduce_on_plateau_patience=config.reduce_lr_on_plateau_patience,
         hidden_size=config.hidden_size,
         attention_head_size=config.attention_head_size,
         dropout=config.dropout,
@@ -190,7 +192,6 @@ def main(**kwargs):
         loss=build_loss(config),
         log_interval=5,  # Adjust logging frequency as needed.
         optimizer="ranger",
-        reduce_on_plateau_patience=4,
     )
     logger.info(f"Number of parameters in network: {tft_model.size() / 1e3:.1f}k")
 

@@ -40,6 +40,9 @@ class Config:
     max_epochs: int = 200  # Early stopping will likely kick in before this.
     gradient_clip_val: float = 0.1
     val_check_interval: float = 0.25
+    reduce_lr_on_plateau_reduction: float = 10
+    reduce_lr_on_plateau_patience: int = 3
+    
     loss: str = "RMSE" # "QuantileLoss" or "RMSE" or "Quantile+RMSE"
 
     # Early stopping parameters
