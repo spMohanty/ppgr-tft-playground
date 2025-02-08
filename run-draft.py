@@ -1,49 +1,20 @@
 import os
-import warnings
-import random
-import uuid
-from dataclasses import dataclass, fields
-from typing import List, Tuple, Any
-
 import numpy as np
-import pandas as pd
 import torch
-from torch.utils.data import DataLoader
-from tqdm import tqdm
 from loguru import logger
 import click
-from rich.progress import Progress, TextColumn, BarColumn, TimeRemainingColumn
-from rich.console import Console
-
-import json
-import hashlib
-
 import wandb
-import matplotlib.pyplot as plt
 
-# PyTorch Forecasting and Lightning imports
-from pytorch_forecasting import (
-    Baseline,
-    TemporalFusionTransformer,
-    TimeSeriesDataSet
-)
-from pytorch_forecasting.data import GroupNormalizer
 from pytorch_forecasting.metrics import QuantileLoss
-
 
 import lightning.pytorch as pl
 from lightning.pytorch.callbacks import EarlyStopping, LearningRateMonitor, ModelCheckpoint
 from lightning.pytorch.loggers import WandbLogger
 
-from torchmetrics.regression import PearsonCorrCoef
-
-
 from config import Config
 from datasets import get_cached_time_series_dataloaders
 from model import PPGRTemporalFusionTransformer
-
 from metrics import PPGRMetricsCallback
-
 from utils import create_click_options
 
 
@@ -87,7 +58,6 @@ def main(**kwargs):
         settings=wandb.Settings(start_method="thread")
     )
     print(f"Wandb directory: {wandb.run.dir}")
-
 
     # Initialize wandb first
     wandb_logger = WandbLogger(
@@ -201,7 +171,7 @@ def main(**kwargs):
     ppgr_metrics_val_callback = PPGRMetricsCallback(mode="val", 
                                                     disable_all_plots=config.disable_all_plots)
     ppgr_metrics_test_callback = PPGRMetricsCallback(mode="test", 
-                                                    disable_all_plots=config.disable_all_plots)
+                                                     disable_all_plots=config.disable_all_plots)
 
     # Initialize callbacks
     callbacks = [   
@@ -223,7 +193,6 @@ def main(**kwargs):
         )
         callbacks.append(checkpoint_callback)
         
-
     # Build the PyTorch Lightning trainer with all callbacks
     trainer = pl.Trainer(
         profiler="simple",

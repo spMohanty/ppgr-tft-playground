@@ -8,7 +8,7 @@ def generate_animations(folder, fps, out_format, output_dir):
     """
     Scans the given folder for PNG files following the naming convention:
       {plot-type-name}_{step_number}_{hash}.png
-    Groups the files by the plot-type, orders them by the step number,
+    Groups the files by the plot type, orders them by the step number,
     and generates an animation (GIF or video) for each plot type.
     
     Parameters:
@@ -16,6 +16,9 @@ def generate_animations(folder, fps, out_format, output_dir):
       fps (float): Frames per second for the animation.
       out_format (str): Output format, e.g., 'gif' or 'mp4'.
       output_dir (str): Directory where animations will be saved.
+      
+    Returns:
+      dict: Keys are the animation file names, values are the file paths where they are saved.
     """
     # Regular expression to capture plot_type, step, and hash.
     # This assumes the plot_type may contain underscores.
@@ -36,6 +39,9 @@ def generate_animations(folder, fps, out_format, output_dir):
         step = int(match.group('step'))
         filepath = os.path.join(folder, filename)
         animations.setdefault(plot_type, []).append((step, filepath))
+
+    # Dictionary holding the output animation file names and paths.
+    generated_animations = {}
 
     # Process each group: sort by step number and generate the animation.
     for plot_type, entries in animations.items():
@@ -72,8 +78,15 @@ def generate_animations(folder, fps, out_format, output_dir):
                 writer.close()
             else:
                 print(f"Unsupported output format: {out_format}")
+                continue
         except Exception as e:
             print(f"Error saving animation for {plot_type}: {e}")
+            continue
+        
+        # Save the output file name and path in our results.
+        generated_animations[out_filename] = out_path
+
+    return generated_animations
 
 def main():
     folder = "/scratch/mohanty/wandb/wandb/run-20250207_115725-saewdb31/files/media/images/"
@@ -81,11 +94,12 @@ def main():
     out_format = "gif"
     output_dir = "animations/"
 
-    # Use the input folder as output if none is provided.
+    # Create output directory if it doesn't exist.
     if not os.path.isdir(output_dir):
         os.makedirs(output_dir, exist_ok=True)
 
-    generate_animations(folder, fps, out_format, output_dir)
+    animations_dict = generate_animations(folder, fps, out_format, output_dir)
+    print("Generated animations:", animations_dict)
 
 if __name__ == "__main__":
     main()
