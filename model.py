@@ -52,6 +52,53 @@ from pytorch_forecasting.metrics import (
 
 from pytorch_forecasting.utils import to_list
 
+class SharedTransformerEncoder(nn.Module):
+    def __init__(self, layer: nn.TransformerEncoderLayer, num_layers: int):
+        """
+        A transformer encoder that applies the same layer (weight sharing) repeatedly.
+        Args:
+            layer (nn.TransformerEncoderLayer): The transformer encoder layer to be shared.
+            num_layers (int): How many times to apply the layer.
+        """
+        super().__init__()
+        self.shared_layer = layer
+        self.num_layers = num_layers
+
+    def forward(self, src, mask=None, src_key_padding_mask=None):
+        output = src
+        for _ in range(self.num_layers):
+            output = self.shared_layer(
+                output,
+                src_mask=mask,
+                src_key_padding_mask=src_key_padding_mask,
+            )
+        return output
+
+class SharedTransformerDecoder(nn.Module):
+    def __init__(self, layer: nn.TransformerDecoderLayer, num_layers: int):
+        """
+        A transformer decoder that applies the same layer (weight sharing) repeatedly.
+        Args:
+            layer (nn.TransformerDecoderLayer): The transformer decoder layer to be shared.
+            num_layers (int): How many times to apply the layer.
+        """
+        super().__init__()
+        self.shared_layer = layer
+        self.num_layers = num_layers
+
+    def forward(self, tgt, memory, tgt_mask=None, 
+                tgt_key_padding_mask=None, memory_key_padding_mask=None):
+        output = tgt
+        for _ in range(self.num_layers):
+            output = self.shared_layer(
+                output,
+                memory,
+                tgt_mask=tgt_mask,
+                tgt_key_padding_mask=tgt_key_padding_mask,
+                memory_key_padding_mask=memory_key_padding_mask,
+            )
+        return output
+
 class GatedTransformerLSTMProjectionUnit(nn.Module):
     """Gated Linear Projection Unit to fuse transformer and LSTM outputs"""
 
@@ -84,10 +131,9 @@ class GatedTransformerLSTMProjectionUnit(nn.Module):
 class PPGRTemporalFusionTransformer(TemporalFusionTransformer):
     def __init__(
         self,
-        n_head: int = 4,
-        num_encoder_layers: int = 4,
-        num_decoder_layers: int = 4,
-        dim_feedforward: int = 32,
+        transformer_num_heads: int = 4,
+        transformer_num_layers: int = 4,
+        transformer_hidden_size: int = 32,
         # Add any new hyperparameters you want for your transformer
         # plus the ones from the parent class
         **kwargs,
@@ -97,10 +143,9 @@ class PPGRTemporalFusionTransformer(TemporalFusionTransformer):
         with a PyTorch nn.TransformerEncoder and nn.TransformerDecoder.
 
         Args:
-            n_head (int): number of attention heads in the transformer
-            num_encoder_layers (int): number of Transformer encoder layers
-            num_decoder_layers (int): number of Transformer decoder layers
-            dim_feedforward (int): size of the feed-forward layers in the transformer
+            transformer_num_heads (int): number of attention heads in the transformer
+            transformer_num_layers (int): number of Transformer encoder layers
+            transformer_hidden_size (int): size of the feed-forward layers in the transformer
             **kwargs: same arguments as TemporalFusionTransformer
         """
         super().__init__(**kwargs)
@@ -109,33 +154,30 @@ class PPGRTemporalFusionTransformer(TemporalFusionTransformer):
         self.validation_batch_full_outputs = []
         self.test_batch_full_outputs = []
         
-        # Remove the LSTMs
-        # del self.lstm_encoder
-        # del self.lstm_decoder
-
+        self.transformer_num_layers = transformer_num_layers
         # Instead, create transformer layers:
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=self.hparams.hidden_size,
-            nhead=n_head,
-            dim_feedforward=dim_feedforward,
+            nhead=transformer_num_heads,
+            dim_feedforward=transformer_hidden_size,
             dropout=self.hparams.dropout,
-            batch_first=True,  # If you're using PyTorch 1.9+, we can simplify
+            batch_first=True,  
         )
         self.transformer_encoder = SharedTransformerEncoder(
             layer=encoder_layer,
-            num_layers=num_encoder_layers,
+            num_layers=transformer_num_layers,
         )
 
         decoder_layer = nn.TransformerDecoderLayer(
             d_model=self.hparams.hidden_size,
-            nhead=n_head,
-            dim_feedforward=dim_feedforward,
+            nhead=transformer_num_heads,
+            dim_feedforward=transformer_hidden_size,
             dropout=self.hparams.dropout,
             batch_first=True,
         )
         self.transformer_decoder = SharedTransformerDecoder(
             layer=decoder_layer,
-            num_layers=num_decoder_layers,
+            num_layers=transformer_num_layers,
         )
         
         self.transformer_lstm_projection_layer = GatedTransformerLSTMProjectionUnit(
@@ -333,7 +375,7 @@ class PPGRTemporalFusionTransformer(TemporalFusionTransformer):
         )
         output = self.pos_wise_ff(attn_output)
         output = self.pre_output_gate_norm(
-            output, lstm_output[:, max_encoder_length:]
+            output, fused_output[:, max_encoder_length:]
         )
 
         # Final linear

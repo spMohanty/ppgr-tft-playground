@@ -5,7 +5,7 @@
 srun --gpus=1 \
      --mem-per-gpu=32G \
      --cpus-per-gpu=8 \
-     --partition=h100 \
+     --partition=l40s \
      --time=12:00:00 \
      --pty /bin/bash
 
