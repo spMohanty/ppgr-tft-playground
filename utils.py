@@ -87,7 +87,7 @@ def set_random_seeds(seed: int = 42) -> None:
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
-    logger.info("Random seeds set to %d", seed)
+    logger.info(f"Random seeds set to {seed}")
 
 
 def calculate_symmetric_quantiles(num_quantiles: int) -> List[float]:
@@ -149,7 +149,7 @@ def setup_experiment_name(config: Config) -> str:
         f"bs{config.batch_size}",
     ]
     experiment_name = "-".join(experiment_name_parts)
-    logger.debug("Experiment name constructed: %s", experiment_name)
+    logger.debug(f"Experiment name constructed: {experiment_name}")
     return experiment_name
 
 
@@ -169,7 +169,7 @@ def initialize_wandb(config: Config, experiment_name: str) -> WandbLogger:
     """
     os.makedirs(config.wandb_dir, exist_ok=True)
     os.environ["WANDB_DIR"] = config.wandb_dir
-    logger.info("WANDB_DIR set to: %s", os.environ["WANDB_DIR"])
+    logger.info(f"WANDB_DIR set to: {os.environ['WANDB_DIR']}")
 
     # Initialize the wandb run.
     wandb.init(
@@ -178,7 +178,7 @@ def initialize_wandb(config: Config, experiment_name: str) -> WandbLogger:
         dir=config.wandb_dir,
         settings=wandb.Settings(start_method="thread")
     )
-    logger.info("Initialized wandb run with directory: %s", wandb.run.dir)
+    logger.info(f"Initialized wandb run with directory: {wandb.run.dir}")
 
     return WandbLogger(project=config.wandb_project, name=experiment_name)
 
@@ -207,7 +207,7 @@ def override_config_from_wandb(config: Config) -> None:
         new_experiment_name = setup_experiment_name(config)
         wandb.run.name = new_experiment_name
         wandb.run.save()
-        logger.info("Configuration overridden from wandb. New experiment name: %s", new_experiment_name)
+        logger.info(f"Configuration overridden from wandb. New experiment name: {new_experiment_name}")
     else:
         logger.warning("wandb.run is not available. Config not overridden.")
 
@@ -220,18 +220,18 @@ if __name__ == "__main__":
         config = Config()  # Assumes that Config is a dataclass with defaults.
         set_random_seeds(config.seed if hasattr(config, "seed") else 42)
         experiment_name = setup_experiment_name(config)
-        logger.info("Experiment Name: %s", experiment_name)
+        logger.info(f"Experiment Name: {experiment_name}")
 
         # Example: Calculate quantiles
         quantiles = calculate_symmetric_quantiles(5)
-        logger.info("Calculated quantiles: %s", quantiles)
+        logger.info(f"Calculated quantiles: {quantiles}")
 
         # Initialize wandb if configured.
         wb_logger = initialize_wandb(config, experiment_name)
-        logger.info("Initialized WandbLogger: %s", wb_logger)
+        logger.info(f"Initialized WandbLogger: {wb_logger}")
 
         # Optionally override configuration from wandb.
         override_config_from_wandb(config)
 
     except Exception as e:
-        logger.exception("An error occurred: %s", e)
+        logger.exception(f"An error occurred: {e}")

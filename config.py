@@ -28,7 +28,7 @@ class Config:
     no_data_cache: bool = False
 
     # DataLoader parameters
-    batch_size: int = 256 
+    batch_size: int = 2048 
     num_workers: int = 8
 
     # Model hyperparameters
@@ -43,11 +43,12 @@ class Config:
 
     # Trainer parameters
     max_epochs: int = 100  # Early stopping will likely kick in before this.
-    gradient_clip_val: float = 0.05
+    gradient_clip_val: float = 0.1
     lr_weight_decay: float = 0.05
     reduce_lr_on_plateau_reduction: float = 10
     reduce_lr_on_plateau_patience: int = 3
-    val_check_interval: float = 0.25
+    
+    val_check_interval: float = 0.5
     trainer_log_interval: int = 1
     
     loss: str = "QuantileLoss" # "QuantileLoss" or "ApproximateCRPS" or "RMSE"
@@ -55,11 +56,11 @@ class Config:
     # Early stopping parameters
     early_stop_monitor_metric: str = "val_loss"
     early_stop_monitor_metric_mode: str = "min"
-    early_stop_patience: int = 100 # REMOVE THIS LATER
-    early_stop_min_delta: float = 1e-4
+    early_stop_patience: int = 10
+    early_stop_min_delta: float = 1e-8
 
     # Checkpoint parameters
-    disable_checkpoints: bool = False
+    disable_checkpoints: bool = True
     checkpoint_monitor_metric: str = "val_loss"
     checkpoint_monitor_metric_mode: str = "min"
     checkpoint_dir: str = "/scratch/mohanty/checkpoints/tft-ppgr-2025"

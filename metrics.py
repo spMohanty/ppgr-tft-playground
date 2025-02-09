@@ -205,8 +205,8 @@ class PPGRMetricsCallback(pl.Callback):
             if idx >= len(axes):
                 break
 
-            pred = metrics_subset["predictions"][metric].detach().cpu().numpy()
-            true = metrics_subset["ground_truth"][metric].detach().cpu().numpy()
+            pred = metrics_subset["predictions"][metric].detach().cpu().to(torch.float32).numpy()
+            true = metrics_subset["ground_truth"][metric].detach().cpu().to(torch.float32).numpy()
 
             # Random subsample if too many points
             if len(pred) > max_points:
@@ -324,8 +324,8 @@ if __name__ == "__main__":
         def plot_prediction(self, past_data, prediction_outputs, idx):
             # Create a dummy plot for the given index.
             fig, ax = plt.subplots()
-            encoder_values = past_data["encoder_target"][idx].detach().cpu().numpy()
-            decoder_target = past_data["decoder_target"][idx].detach().cpu().numpy()
+            encoder_values = past_data["encoder_target"][idx].detach().cpu().to(torch.float32).numpy()
+            decoder_target = past_data["decoder_target"][idx].detach().cpu().to(torch.float32).numpy()
             ax.plot(encoder_values, label="encoder_target")
             ax.plot(decoder_target, label="decoder_target")
             ax.legend()

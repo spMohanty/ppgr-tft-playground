@@ -30,6 +30,7 @@ from lightning.pytorch.loggers import TensorBoardLogger
 
 from pytorch_forecasting import Baseline, TemporalFusionTransformer, TimeSeriesDataSet
 
+from typing import Any, Dict, Optional, Union
 
 import torch
 from torch import nn
@@ -37,13 +38,56 @@ import math
 
 from pytorch_forecasting.utils import create_mask
 
+from pytorch_forecasting.metrics.base_metrics import Metric
+from pytorch_forecasting.metrics import (
+    MAE,
+    MASE,
+    SMAPE,
+    DistributionLoss,
+    MultiHorizonMetric,
+    MultiLoss,
+    QuantileLoss,
+    convert_torchmetric_to_pytorch_forecasting_metric,
+)
+
+from pytorch_forecasting.utils import to_list
+
+class GatedTransformerLSTMProjectionUnit(nn.Module):
+    """Gated Linear Projection Unit to fuse transformer and LSTM outputs"""
+
+    def __init__(self, hidden_size: int = None, dropout: float = None):
+        super().__init__()
+
+        if dropout is not None:
+            self.dropout = nn.Dropout(dropout)
+        else:
+            self.dropout = dropout
+        self.hidden_size = hidden_size
+        self.fc = nn.Linear(hidden_size * 2, hidden_size * 2)
+
+        self.init_weights()
+
+    def init_weights(self):
+        for n, p in self.named_parameters():
+            if "bias" in n:
+                torch.nn.init.zeros_(p)
+            elif "fc" in n:
+                torch.nn.init.xavier_uniform_(p)
+
+    def forward(self, x):
+        if self.dropout is not None:
+            x = self.dropout(x)
+        x = self.fc(x)
+        x = F.glu(x, dim=-1)
+        return x
+
 class PPGRTemporalFusionTransformer(TemporalFusionTransformer):
     def __init__(
         self,
         n_head: int = 4,
-        num_encoder_layers: int = 8,
-        num_decoder_layers: int = 8,
-        dim_feedforward: int = 512,
+        num_encoder_layers: int = 4,
+        num_decoder_layers: int = 4,
+        dim_feedforward: int = 32,
         # Add any new hyperparameters you want for your transformer
         # plus the ones from the parent class
         **kwargs,
@@ -61,9 +105,13 @@ class PPGRTemporalFusionTransformer(TemporalFusionTransformer):
         """
         super().__init__(**kwargs)
         
+        # Setup variables needed for the Metrics Callback
+        self.validation_batch_full_outputs = []
+        self.test_batch_full_outputs = []
+        
         # Remove the LSTMs
-        del self.lstm_encoder
-        del self.lstm_decoder
+        # del self.lstm_encoder
+        # del self.lstm_decoder
 
         # Instead, create transformer layers:
         encoder_layer = nn.TransformerEncoderLayer(
@@ -73,8 +121,9 @@ class PPGRTemporalFusionTransformer(TemporalFusionTransformer):
             dropout=self.hparams.dropout,
             batch_first=True,  # If you're using PyTorch 1.9+, we can simplify
         )
-        self.transformer_encoder = nn.TransformerEncoder(
-            encoder_layer, num_layers=num_encoder_layers
+        self.transformer_encoder = SharedTransformerEncoder(
+            layer=encoder_layer,
+            num_layers=num_encoder_layers,
         )
 
         decoder_layer = nn.TransformerDecoderLayer(
@@ -84,13 +133,16 @@ class PPGRTemporalFusionTransformer(TemporalFusionTransformer):
             dropout=self.hparams.dropout,
             batch_first=True,
         )
-        self.transformer_decoder = nn.TransformerDecoder(
-            decoder_layer, num_layers=num_decoder_layers
+        self.transformer_decoder = SharedTransformerDecoder(
+            layer=decoder_layer,
+            num_layers=num_decoder_layers,
         )
         
-        # Setup variables needed for the Metrics Callback
-        self.validation_batch_full_outputs = []
-        self.test_batch_full_outputs = []
+        self.transformer_lstm_projection_layer = GatedTransformerLSTMProjectionUnit(
+            hidden_size=self.hparams.hidden_size,
+            dropout=self.hparams.dropout
+        )
+        
         
 
     def forward(self, x: dict) -> dict:
@@ -161,7 +213,7 @@ class PPGRTemporalFusionTransformer(TemporalFusionTransformer):
         )
 
         # --------------------------------------------------------------------
-        # Replace LSTM with Transformer
+        # Process inputs with Transformer
         # --------------------------------------------------------------------
         # We have "embeddings_varying_encoder" for the historical part (B x T_enc x hidden)
         # and "embeddings_varying_decoder" for the future part (B x T_dec x hidden).
@@ -186,45 +238,85 @@ class PPGRTemporalFusionTransformer(TemporalFusionTransformer):
         )
 
         # Pass through the encoder
-        encoder_output = self.transformer_encoder(
+        transformer_encoder_output = self.transformer_encoder(
             src=embeddings_varying_encoder,  # B x T_enc x hidden
             src_key_padding_mask=encoder_padding_mask,  # B x T_enc
         )  # -> B x T_enc x hidden
 
         # Pass through the decoder
-        decoder_output = self.transformer_decoder(
+        transformer_decoder_output = self.transformer_decoder(
             tgt=embeddings_varying_decoder,        # B x T_dec x hidden
-            memory=encoder_output,                 # B x T_enc x hidden
+            memory=transformer_encoder_output,                 # B x T_enc x hidden
             tgt_mask=causal_mask,                  # T_dec x T_dec, standard
             tgt_key_padding_mask=decoder_padding_mask,  # B x T_dec
             memory_key_padding_mask=encoder_padding_mask,  # B x T_enc
         )  # -> B x T_dec x hidden
 
-        # --------------------------------------------------------------------
-        # Now mimic the skip connections that were used for LSTM.
-        # Instead of post_lstm_gate_encoder/decoder, we have only one decoder output.
-        # But let's do something similar:
-        # --------------------------------------------------------------------
 
-        lstm_output_encoder = self.post_lstm_gate_encoder(encoder_output)
+        # Add post transformer gating
+        transformer_output_encoder = self.post_lstm_gate_encoder(transformer_encoder_output)
+        transformer_output_encoder = self.post_lstm_add_norm_encoder(
+            transformer_output_encoder, embeddings_varying_encoder
+        )
+
+        transformer_output_decoder = self.post_lstm_gate_decoder(transformer_decoder_output)
+        transformer_output_decoder = self.post_lstm_add_norm_decoder(
+            transformer_output_decoder, embeddings_varying_decoder
+        )
+
+        transformer_output = torch.cat([transformer_output_encoder, transformer_output_decoder], dim=1)
+
+        # --------------------------------------------------------------------
+        # Process with the LSTM layer as well
+        # --------------------------------------------------------------------
+        
+        # calculate initial state
+        input_hidden = self.static_context_initial_hidden_lstm(static_embedding).expand(
+            self.hparams.lstm_layers, -1, -1
+        )
+        input_cell = self.static_context_initial_cell_lstm(static_embedding).expand(
+            self.hparams.lstm_layers, -1, -1
+        )
+
+        # run local encoder
+        lstm_encoder_output, (hidden, cell) = self.lstm_encoder(
+            embeddings_varying_encoder,
+            (input_hidden, input_cell),
+            lengths=encoder_lengths,
+            enforce_sorted=False,
+        )
+
+        # run local decoder
+        lstm_decoder_output, _ = self.lstm_decoder(
+            embeddings_varying_decoder,
+            (hidden, cell),
+            lengths=decoder_lengths,
+            enforce_sorted=False,
+        )
+    
+    
+        lstm_output_encoder = self.post_lstm_gate_encoder(lstm_encoder_output)
         lstm_output_encoder = self.post_lstm_add_norm_encoder(
             lstm_output_encoder, embeddings_varying_encoder
         )
 
-        lstm_output_decoder = self.post_lstm_gate_decoder(decoder_output)
+        lstm_output_decoder = self.post_lstm_gate_decoder(lstm_decoder_output)
         lstm_output_decoder = self.post_lstm_add_norm_decoder(
             lstm_output_decoder, embeddings_varying_decoder
         )
 
-        # Combine them just like in the parent
+        # Combine last encoder and decoder outputs
         lstm_output = torch.cat([lstm_output_encoder, lstm_output_decoder], dim=1)
 
+        # Merge transformer and LSTM outputs
+        fused_output = self.transformer_lstm_projection_layer(torch.cat([transformer_output, lstm_output], dim=-1))
+                
         # static enrichment
         static_context_enrichment = self.static_context_enrichment(static_embedding)
-        attn_input = self.static_enrichment(
-            lstm_output,
-            self.expand_static_context(static_context_enrichment, timesteps),
-        )
+        attn_input = self.static_enrichment(fused_output,
+                                            self.expand_static_context(
+                                                static_context_enrichment, 
+                                                timesteps))
 
         # multihead attn over entire sequence
         attn_output, attn_output_weights = self.multihead_attn(
@@ -285,3 +377,164 @@ class PPGRTemporalFusionTransformer(TemporalFusionTransformer):
         self.testing_step_outputs.append(log)
         self.test_batch_full_outputs.append((log, out))
         return log
+
+    # def plot_prediction(
+    #     self,
+    #     x: Dict[str, torch.Tensor],
+    #     out: Dict[str, torch.Tensor],
+    #     idx: int = 0,
+    #     add_loss_to_title: Union[Metric, torch.Tensor, bool] = False,
+    #     show_future_observed: bool = True,
+    #     ax=None,
+    #     quantiles_kwargs: Optional[Dict[str, Any]] = None,
+    #     prediction_kwargs: Optional[Dict[str, Any]] = None,
+    # ):
+    #     """
+    #     Plot prediction of prediction vs actuals
+
+    #     Args:
+    #         x: network input
+    #         out: network output
+    #         idx: index of prediction to plot
+    #         add_loss_to_title: if to add loss to title or loss function to calculate. Can be either metrics,
+    #             bool indicating if to use loss metric or tensor which contains losses for all samples.
+    #             Calcualted losses are determined without weights. Default to False.
+    #         show_future_observed: if to show actuals for future. Defaults to True.
+    #         ax: matplotlib axes to plot on
+    #         quantiles_kwargs (Dict[str, Any]): parameters for ``to_quantiles()`` of the loss metric.
+    #         prediction_kwargs (Dict[str, Any]): parameters for ``to_prediction()`` of the loss metric.
+
+    #     Returns:
+    #         matplotlib figure
+    #     """  # noqa: E501
+    #     if quantiles_kwargs is None:
+    #         quantiles_kwargs = {}
+    #     if prediction_kwargs is None:
+    #         prediction_kwargs = {}
+
+    #     from matplotlib import pyplot as plt
+
+    #     # all true values for y of the first sample in batch
+    #     encoder_targets = to_list(x["encoder_target"])
+    #     decoder_targets = to_list(x["decoder_target"])
+
+    #     y_raws = to_list(
+    #         out["prediction"]
+    #     )  # raw predictions - used for calculating loss
+    #     y_hats = to_list(self.to_prediction(out, **prediction_kwargs))
+    #     y_quantiles = to_list(self.to_quantiles(out, **quantiles_kwargs))
+
+    #     # for each target, plot
+    #     figs = []
+    #     for y_raw, y_hat, y_quantile, encoder_target, decoder_target in zip(
+    #         y_raws, y_hats, y_quantiles, encoder_targets, decoder_targets
+    #     ):
+    #         y_all = torch.cat([encoder_target[idx], decoder_target[idx]])
+    #         max_encoder_length = x["encoder_lengths"].max()
+    #         y = torch.cat(
+    #             (
+    #                 y_all[: x["encoder_lengths"][idx]],
+    #                 y_all[
+    #                     max_encoder_length : (
+    #                         max_encoder_length + x["decoder_lengths"][idx]
+    #                     )
+    #                 ],
+    #             ),
+    #         )
+    #         # move predictions to cpu
+    #         y_hat = y_hat.detach().cpu().to(torch.float32)[idx, : x["decoder_lengths"][idx]]
+    #         y_quantile = y_quantile.detach().cpu().to(torch.float32)[idx, : x["decoder_lengths"][idx]]
+    #         y_raw = y_raw.detach().cpu().to(torch.float32)[idx, : x["decoder_lengths"][idx]]
+
+    #         # move to cpu
+    #         y = y.detach().cpu().to(torch.float32)
+    #         # create figure
+    #         if ax is None:
+    #             fig, ax = plt.subplots()
+    #         else:
+    #             fig = ax.get_figure()
+    #         n_pred = y_hat.shape[0]
+    #         x_obs = np.arange(-(y.shape[0] - n_pred), 0)
+    #         x_pred = np.arange(n_pred)
+    #         prop_cycle = iter(plt.rcParams["axes.prop_cycle"])
+    #         obs_color = next(prop_cycle)["color"]
+    #         pred_color = next(prop_cycle)["color"]
+    #         # plot observed history
+    #         if len(x_obs) > 0:
+    #             if len(x_obs) > 1:
+    #                 plotter = ax.plot
+    #             else:
+    #                 plotter = ax.scatter
+    #             plotter(x_obs, y[:-n_pred], label="observed", c=obs_color)
+    #         if len(x_pred) > 1:
+    #             plotter = ax.plot
+    #         else:
+    #             plotter = ax.scatter
+
+    #         # plot observed prediction
+    #         if show_future_observed:
+    #             plotter(x_pred, y[-n_pred:], label=None, c=obs_color)
+
+    #         # plot prediction
+    #         plotter(x_pred, y_hat, label="predicted", c=pred_color)
+
+    #         # plot predicted quantiles
+    #         plotter(
+    #             x_pred,
+    #             y_quantile[:, y_quantile.shape[1] // 2],
+    #             c=pred_color,
+    #             alpha=0.15,
+    #         )
+    #         for i in range(y_quantile.shape[1] // 2):
+    #             if len(x_pred) > 1:
+    #                 ax.fill_between(
+    #                     x_pred,
+    #                     y_quantile[:, i],
+    #                     y_quantile[:, -i - 1],
+    #                     alpha=0.15,
+    #                     fc=pred_color,
+    #                 )
+    #             else:
+    #                 quantiles = torch.tensor(
+    #                     [[y_quantile[0, i]], [y_quantile[0, -i - 1]]]
+    #                 )
+    #                 ax.errorbar(
+    #                     x_pred,
+    #                     y[[-n_pred]],
+    #                     yerr=quantiles - y[-n_pred],
+    #                     c=pred_color,
+    #                     capsize=1.0,
+    #                 )
+    
+    #         if add_loss_to_title is not False:
+    #             if isinstance(add_loss_to_title, bool):
+    #                 loss = self.loss
+    #             elif isinstance(add_loss_to_title, torch.Tensor):
+    #                 loss = add_loss_to_title.detach()[idx].item()
+    #             elif isinstance(add_loss_to_title, Metric):
+    #                 loss = add_loss_to_title
+    #             else:
+    #                 raise ValueError(
+    #                     f"add_loss_to_title '{add_loss_to_title}'' is unkown"
+    #                 )
+    #             if isinstance(loss, MASE):
+    #                 loss_value = loss(
+    #                     y_raw[None], (y[-n_pred:][None], None), y[:n_pred][None]
+    #                 )
+    #             elif isinstance(loss, Metric):
+    #                 try:
+    #                     loss_value = loss(y_raw[None], (y[-n_pred:][None], None))
+    #                 except Exception:
+    #                     loss_value = "-"
+    #             else:
+    #                 loss_value = loss
+    #             ax.set_title(f"Loss {loss_value}")
+    #         ax.set_xlabel("Time index")
+    #         fig.legend()
+    #         figs.append(fig)
+
+    #     # return multiple of target is a list, otherwise return single figure
+    #     if isinstance(x["encoder_target"], (tuple, list)):
+    #         return figs
+    #     else:
+    #         return fig

@@ -13,8 +13,7 @@ from lightning.pytorch.loggers import WandbLogger
 from config import Config
 from datasets import get_time_series_dataloaders
 
-#from model import PPGRTemporalFusionTransformer
-from model_v1 import PPGRTemporalFusionTransformer
+from model import PPGRTemporalFusionTransformer
 
 from metrics import PPGRMetricsCallback
 from loss import build_loss
@@ -69,13 +68,14 @@ def build_trainer(config: Config, callbacks: list, wandb_logger: WandbLogger) ->
     """Instantiate and return the Lightning Trainer."""
     return pl.Trainer(
         profiler="simple",
+        # precision="bf16",
         max_epochs=config.max_epochs,
         accelerator="auto",
         enable_model_summary=True,
         gradient_clip_val=config.gradient_clip_val,
         callbacks=callbacks,
         logger=wandb_logger,
-        val_check_interval=config.val_check_interval,
+        val_check_interval=config.val_check_interval
     )
 
 @click.command()
@@ -97,7 +97,7 @@ def main(**kwargs):
 
     # In debug mode, run only one epoch.
     if config.debug_mode:
-        config.max_epochs = 30
+        config.max_epochs = 1
 
     # Override config parameters if running a sweep.
     override_config_from_wandb(config)
@@ -124,19 +124,28 @@ def main(**kwargs):
     # Build the Temporal Fusion Transformer model using the training dataset.
     tft_model = PPGRTemporalFusionTransformer.from_dataset(
         train_loader.dataset,
-        learning_rate=config.learning_rate,
-        weight_decay=config.lr_weight_decay,
-        reduce_on_plateau_reduction=config.reduce_lr_on_plateau_reduction,
-        reduce_on_plateau_patience=config.reduce_lr_on_plateau_patience,
+        
+        # Model hyperparameters
         hidden_size=config.hidden_size,
         lstm_layers=config.lstm_layers,
         attention_head_size=config.attention_head_size,
         dropout=config.dropout,
         hidden_continuous_size=config.hidden_continuous_size,
         output_size=config.num_quantiles,
-        loss=build_loss(config),
+        
+        # Loss function
+        loss=build_loss(config),        
+        
+        # Optimizer hyperparameters
+        optimizer="adamw",
+        learning_rate=config.learning_rate,
+        weight_decay=config.lr_weight_decay,
+        reduce_on_plateau_reduction=config.reduce_lr_on_plateau_reduction,
+        reduce_on_plateau_patience=config.reduce_lr_on_plateau_patience,
+        
+        # Logging
         log_interval=config.trainer_log_interval,
-        optimizer="ranger",
+        
     )
     logger.info(f"Number of parameters in network: {tft_model.size() / 1e3:.1f}k")
 

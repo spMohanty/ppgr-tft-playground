@@ -335,7 +335,7 @@ if __name__ == "__main__":
     # check config.py for details
     config = Config()
     
-    # config.debug_mode = True
+    config.debug_mode = True
 
     print("=== Testing Cached Time Series DataLoaders ===")
     
@@ -349,13 +349,18 @@ if __name__ == "__main__":
     print(f"\nTrain loader has {len(train_loader)} batches.")
     print(f"Validation loader has {len(val_loader)} batches.")
     print(f"Test loader has {len(test_loader)} batches.")
-    
-    # Print a sample batch from the train_loader.
+
+    # # Print a sample batch from the train_loader.
     print("\n=== Sample Batch from Train Loader ===")
     for batch in train_loader:
         past_data, future_data = batch
         print(f"past_data: {past_data}")
         print(f"future_data: {future_data}")
+                
         break  # Only process one batch for testing purposes.
     
     print("\nTest run completed successfully!")
+
+
+
+    
