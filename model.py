@@ -24,9 +24,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from typing import Dict
 
-import lightning.pytorch as pl
-from lightning.pytorch.callbacks import EarlyStopping, LearningRateMonitor
-from lightning.pytorch.loggers import TensorBoardLogger
+from loguru import logger
 
 from pytorch_forecasting import Baseline, TemporalFusionTransformer, TimeSeriesDataSet
 
@@ -52,129 +50,31 @@ from pytorch_forecasting.metrics import (
 
 from pytorch_forecasting.utils import to_list
 
-class SharedTransformerEncoder(nn.Module):
-    def __init__(self, layer: nn.TransformerEncoderLayer, num_layers: int):
-        """
-        A transformer encoder that applies the same layer (weight sharing) repeatedly.
-        Args:
-            layer (nn.TransformerEncoderLayer): The transformer encoder layer to be shared.
-            num_layers (int): How many times to apply the layer.
-        """
-        super().__init__()
-        self.shared_layer = layer
-        self.num_layers = num_layers
+from sub_modules import (
+    SharedTransformerEncoder,
+    SharedTransformerDecoder,
+    GatedTransformerLSTMProjectionUnit,
+    TransformerVariableSelectionNetwork,
+    PatchedVariableSelectionNetwork
+)
 
-    def forward(self, src, mask=None, src_key_padding_mask=None):
-        output = src
-        for _ in range(self.num_layers):
-            output = self.shared_layer(
-                output,
-                src_mask=mask,
-                src_key_padding_mask=src_key_padding_mask,
-            )
-        return output
+from pytorch_forecasting.models.temporal_fusion_transformer.sub_modules import GatedResidualNetwork
 
-class SharedTransformerDecoder(nn.Module):
-    def __init__(self, layer: nn.TransformerDecoderLayer, num_layers: int):
-        """
-        A transformer decoder that applies the same layer (weight sharing) repeatedly.
-        Args:
-            layer (nn.TransformerDecoderLayer): The transformer decoder layer to be shared.
-            num_layers (int): How many times to apply the layer.
-        """
-        super().__init__()
-        self.shared_layer = layer
-        self.num_layers = num_layers
-
-    def forward(self, tgt, memory, tgt_mask=None, 
-                tgt_key_padding_mask=None, memory_key_padding_mask=None):
-        output = tgt
-        for _ in range(self.num_layers):
-            output = self.shared_layer(
-                output,
-                memory,
-                tgt_mask=tgt_mask,
-                tgt_key_padding_mask=tgt_key_padding_mask,
-                memory_key_padding_mask=memory_key_padding_mask,
-            )
-        return output
-
-class GatedTransformerLSTMProjectionUnit(nn.Module):
-    """Gated Linear Projection Unit to fuse transformer and LSTM outputs"""
-
-    def __init__(self, hidden_size: int = None, dropout: float = None):
-        super().__init__()
-
-        if dropout is not None:
-            self.dropout = nn.Dropout(dropout)
-        else:
-            self.dropout = dropout
-        self.hidden_size = hidden_size
-        self.fc = nn.Linear(hidden_size * 2, hidden_size * 2)
-
-        self.init_weights()
-
-    def init_weights(self):
-        for n, p in self.named_parameters():
-            if "bias" in n:
-                torch.nn.init.zeros_(p)
-            elif "fc" in n:
-                torch.nn.init.xavier_uniform_(p)
-
-    def forward(self, x):
-        if self.dropout is not None:
-            x = self.dropout(x)
-        x = self.fc(x)
-        x = F.glu(x, dim=-1)
-        return x
-
-def conditional_enforce_quantile_monotonicity(tensor_input: torch.Tensor,
-                                                enforce_quantile_monotonicity: bool = True) -> torch.Tensor:
-    """
-    Enforces quantile monotonicity on the output tensor if requested.
-
-    In some quantile regression setups, the model is designed to predict the _increments_
-    between quantiles rather than the absolute quantile values. To obtain the actual quantile
-    values, we need to perform the following two steps:
-    
-      1. Apply a non-negative activation (e.g., softplus) to the raw outputs so that all increments are ≥ 0.
-      2. Compute the cumulative sum along the quantile dimension to convert increments into absolute quantile values.
-    
-    This ensures that the quantile values are monotonically increasing (i.e., no quantile crossing).
-
-    Args:
-        tensor_input (torch.Tensor): The raw tensor representing quantile increments.
-            Expected shape: [..., num_quantiles]. For example, with an output shape of [70, 8, 7],
-            the last dimension corresponds to the 7 quantile increments. 
-            This is the output of the previous later, and the output of this should be the final layer.
-        enforce_quantile_monotonicity (bool): Flag to enable/disable the monotonicity enforcement.
-            If True, the cumulative sum is applied; if False, the raw output is returned as is.
-
-    Returns:
-        torch.Tensor: The processed tensor containing monotonic quantile values (if enforcement is enabled)
-        or the raw output otherwise.
-    """
-    if enforce_quantile_monotonicity:
-        # Step 1: Ensure the increments are non-negative by applying softplus.
-        # This is important because negative increments could lead to non-monotonic quantile values.
-        non_negative_increments = F.relu(tensor_input)
-        
-        # Step 2: Convert increments into absolute quantile values using a cumulative sum.
-        # The cumulative sum is computed along the last dimension (assumed to be the quantile dimension).
-        output = torch.cumsum(non_negative_increments, dim=-1)
-    else:
-        output = tensor_input
-    
-    return output
+from utils import conditional_enforce_quantile_monotonicity
 
 
 class PPGRTemporalFusionTransformer(TemporalFusionTransformer):
     def __init__(
         self,
-        transformer_num_heads: int = 4,
-        transformer_num_layers: int = 4,
-        transformer_hidden_size: int = 32,
+        transformer_encoder_decoder_num_heads: int = 4,
+        transformer_encoder_decoder_num_layers: int = 4,
+        transformer_encoder_decoder_hidden_size: int = 32,
+        
+        use_transformer_encoder_decoder_layers: bool = True,
+        use_transformer_variable_selection_networks: bool = False,
+        
         enforce_quantile_monotonicity: bool = False,
+
         **kwargs,
     ):
         """
@@ -182,52 +82,186 @@ class PPGRTemporalFusionTransformer(TemporalFusionTransformer):
         with a PyTorch nn.TransformerEncoder and nn.TransformerDecoder.
 
         Args:
-            transformer_num_heads (int): number of attention heads in the transformer
-            transformer_num_layers (int): number of Transformer encoder layers
-            transformer_hidden_size (int): size of the feed-forward layers in the transformer
+            transformer_encoder_decoder_num_heads (int): number of attention heads in the transformer
+            transformer_encoder_decoder_num_layers (int): number of Transformer encoder layers
+            transformer_encoder_decoder_hidden_size (int): size of the feed-forward layers in the transformer
             **kwargs: same arguments as TemporalFusionTransformer
         """
         super().__init__(**kwargs)
         
-        self.enforce_quantile_monotonicity = enforce_quantile_monotonicity
+        # Setup custom hyperparameters
+        # Transformer encoder-decoder layers
+        # self.hparams.use_transformer_encoder_decoder_layers = use_transformer_encoder_decoder_layers
+        # self.hparams.transformer_encoder_decoder_num_heads = transformer_encoder_decoder_num_heads
+        # self.hparams.transformer_encoder_decoder_num_layers = transformer_encoder_decoder_num_layers
+        # self.hparams.transformer_encoder_decoder_hidden_size = transformer_encoder_decoder_hidden_size
         
+        # # Variable selection networks
+        # self.hparams.use_transformer_variable_selection_networks = use_transformer_variable_selection_networks
+        
+        # self.hparams.enforce_quantile_monotonicity = enforce_quantile_monotonicity
+        
+                
         # Setup variables needed for the Metrics Callback
         self.training_batch_full_outputs = []
         self.validation_batch_full_outputs = []
         self.test_batch_full_outputs = []
         
-        self.transformer_num_layers = transformer_num_layers
+        self.transformer_encoder_decoder_num_layers = transformer_encoder_decoder_num_layers
+        
+        logger.info("Setting up variable selection networks")
+        self.setup_variable_selection_networks()
+        
+        if self.hparams.use_transformer_encoder_decoder_layers:
+            logger.info("Setting up transformer encoder decoder layers")
+            self.setup_transformer_encoder_decoder_layers()
+        
+        logger.info("Using PPGRTemporalFusionTransformer")
+        logger.info(f"self.hparams : {self.hparams}")
+        
+        
+    def setup_transformer_encoder_decoder_layers(self):
         # Instead, create transformer layers:
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=self.hparams.hidden_size,
-            nhead=transformer_num_heads,
-            dim_feedforward=transformer_hidden_size,
+            nhead=self.hparams.transformer_encoder_decoder_num_heads,
+            dim_feedforward=self.hparams.transformer_encoder_decoder_hidden_size,
             dropout=self.hparams.dropout,
             batch_first=True,  
         )
         self.transformer_encoder = SharedTransformerEncoder(
             layer=encoder_layer,
-            num_layers=transformer_num_layers,
+            num_layers=self.transformer_encoder_decoder_num_layers,
         )
 
         decoder_layer = nn.TransformerDecoderLayer(
             d_model=self.hparams.hidden_size,
-            nhead=transformer_num_heads,
-            dim_feedforward=transformer_hidden_size,
+            nhead=self.hparams.transformer_encoder_decoder_num_heads,
+            dim_feedforward=self.hparams.transformer_encoder_decoder_hidden_size,
             dropout=self.hparams.dropout,
             batch_first=True,
         )
         self.transformer_decoder = SharedTransformerDecoder(
             layer=decoder_layer,
-            num_layers=transformer_num_layers,
+            num_layers=self.transformer_encoder_decoder_num_layers,
         )
         
         self.transformer_lstm_projection_layer = GatedTransformerLSTMProjectionUnit(
             hidden_size=self.hparams.hidden_size,
             dropout=self.hparams.dropout
         )
+
+    def setup_variable_selection_networks(self):
+        # variable selection
+        # variable selection for static variables
+        static_input_sizes = {
+            name: self.input_embeddings.output_size[name]
+            for name in self.hparams.static_categoricals
+        }
+        static_input_sizes.update(
+            {
+                name: self.hparams.hidden_continuous_sizes.get(
+                    name, self.hparams.hidden_continuous_size
+                )
+                for name in self.hparams.static_reals
+            }
+        )
         
+        if self.hparams.use_transformer_variable_selection_networks:
+            logger.info("Using TransformerVariableSelectionNetwork")
+            VariableSelectionNetwork = TransformerVariableSelectionNetwork
+        else:
+            logger.info("Using PatchedVariableSelectionNetwork")
+            VariableSelectionNetwork = PatchedVariableSelectionNetwork
         
+        self.static_variable_selection = VariableSelectionNetwork(
+            input_sizes=static_input_sizes,
+            hidden_size=self.hparams.hidden_size,
+            input_embedding_flags={
+                name: True for name in self.hparams.static_categoricals
+            },
+            dropout=self.hparams.dropout,
+            prescalers=self.prescalers,
+        )
+
+        # variable selection for encoder and decoder
+        encoder_input_sizes = {
+            name: self.input_embeddings.output_size[name]
+            for name in self.hparams.time_varying_categoricals_encoder
+        }
+        encoder_input_sizes.update(
+            {
+                name: self.hparams.hidden_continuous_sizes.get(
+                    name, self.hparams.hidden_continuous_size
+                )
+                for name in self.hparams.time_varying_reals_encoder
+            }
+        )
+
+        decoder_input_sizes = {
+            name: self.input_embeddings.output_size[name]
+            for name in self.hparams.time_varying_categoricals_decoder
+        }
+        decoder_input_sizes.update(
+            {
+                name: self.hparams.hidden_continuous_sizes.get(
+                    name, self.hparams.hidden_continuous_size
+                )
+                for name in self.hparams.time_varying_reals_decoder
+            }
+        )
+
+        # create single variable grns that are shared across decoder and encoder
+        if self.hparams.share_single_variable_networks:
+            self.shared_single_variable_grns = nn.ModuleDict()
+            for name, input_size in encoder_input_sizes.items():
+                self.shared_single_variable_grns[name] = GatedResidualNetwork(
+                    input_size,
+                    min(input_size, self.hparams.hidden_size),
+                    self.hparams.hidden_size,
+                    self.hparams.dropout,
+                )
+            for name, input_size in decoder_input_sizes.items():
+                if name not in self.shared_single_variable_grns:
+                    self.shared_single_variable_grns[name] = GatedResidualNetwork(
+                        input_size,
+                        min(input_size, self.hparams.hidden_size),
+                        self.hparams.hidden_size,
+                        self.hparams.dropout,
+                    )
+
+        self.encoder_variable_selection = VariableSelectionNetwork(
+            input_sizes=encoder_input_sizes,
+            hidden_size=self.hparams.hidden_size,
+            input_embedding_flags={
+                name: True for name in self.hparams.time_varying_categoricals_encoder
+            },
+            dropout=self.hparams.dropout,
+            context_size=self.hparams.hidden_size,
+            prescalers=self.prescalers,
+            single_variable_grns=(
+                {}
+                if not self.hparams.share_single_variable_networks
+                else self.shared_single_variable_grns
+            ),
+        )
+
+        self.decoder_variable_selection = VariableSelectionNetwork(
+            input_sizes=decoder_input_sizes,
+            hidden_size=self.hparams.hidden_size,
+            input_embedding_flags={
+                name: True for name in self.hparams.time_varying_categoricals_decoder
+            },
+            dropout=self.hparams.dropout,
+            context_size=self.hparams.hidden_size,
+            prescalers=self.prescalers,
+            single_variable_grns=(
+                {}
+                if not self.hparams.share_single_variable_networks
+                else self.shared_single_variable_grns
+            ),
+        )
+
 
     def forward(self, x: dict) -> dict:
         """
@@ -296,59 +330,61 @@ class PPGRTemporalFusionTransformer(TemporalFusionTransformer):
             )
         )
 
+        
+        if self.hparams.use_transformer_encoder_decoder_layers:
         # --------------------------------------------------------------------
         # Process inputs with Transformer
         # --------------------------------------------------------------------
         # We have "embeddings_varying_encoder" for the historical part (B x T_enc x hidden)
         # and "embeddings_varying_decoder" for the future part (B x T_dec x hidden).
 
-        # Construct padding masks for the transformer (True = ignore)
-        # We want shape: (B, T_enc) and (B, T_dec)
-        encoder_padding_mask = create_mask(
-            max_encoder_length, encoder_lengths
-        )  # True where "padding"
-        decoder_padding_mask = create_mask(
-            embeddings_varying_decoder.shape[1], decoder_lengths
-        )
+            # Construct padding masks for the transformer (True = ignore)
+            # We want shape: (B, T_enc) and (B, T_dec)
+            encoder_padding_mask = create_mask(
+                max_encoder_length, encoder_lengths
+            )  # True where "padding"
+            decoder_padding_mask = create_mask(
+                embeddings_varying_decoder.shape[1], decoder_lengths
+            )
 
-        # Optionally create a causal mask for the decoder:
-        # Typically, the nn.TransformerDecoder by default uses a causal mask
-        # if you pass `tgt_mask`, but you might prefer to let the model attend to
-        # all known future steps (the original TFT's "causal_attention" param).
-        # For simplicity, let's do standard causal masking:
-        T_dec = embeddings_varying_decoder.shape[1]
-        causal_mask = nn.Transformer().generate_square_subsequent_mask(T_dec).to(
-            embeddings_varying_decoder.device
-        )
+            # create a causal mask for the decoder:
+            # Typically, the nn.TransformerDecoder by default uses a causal mask
+            # if you pass `tgt_mask`, but you might prefer to let the model attend to
+            # all known future steps (the original TFT's "causal_attention" param).
+            # For simplicity, let's do standard causal masking:
+            T_dec = embeddings_varying_decoder.shape[1]
+            causal_mask = nn.Transformer().generate_square_subsequent_mask(T_dec).to(
+                embeddings_varying_decoder.device
+            )
 
-        # Pass through the encoder
-        transformer_encoder_output = self.transformer_encoder(
-            src=embeddings_varying_encoder,  # B x T_enc x hidden
-            src_key_padding_mask=encoder_padding_mask,  # B x T_enc
-        )  # -> B x T_enc x hidden
+            # Pass through the encoder
+            transformer_encoder_output = self.transformer_encoder(
+                src=embeddings_varying_encoder,  # B x T_enc x hidden
+                src_key_padding_mask=encoder_padding_mask,  # B x T_enc
+            )  # -> B x T_enc x hidden
 
-        # Pass through the decoder
-        transformer_decoder_output = self.transformer_decoder(
-            tgt=embeddings_varying_decoder,        # B x T_dec x hidden
-            memory=transformer_encoder_output,                 # B x T_enc x hidden
-            tgt_mask=causal_mask,                  # T_dec x T_dec, standard
-            tgt_key_padding_mask=decoder_padding_mask,  # B x T_dec
-            memory_key_padding_mask=encoder_padding_mask,  # B x T_enc
-        )  # -> B x T_dec x hidden
+            # Pass through the decoder
+            transformer_decoder_output = self.transformer_decoder(
+                tgt=embeddings_varying_decoder,        # B x T_dec x hidden
+                memory=transformer_encoder_output,                 # B x T_enc x hidden
+                tgt_mask=causal_mask,                  # T_dec x T_dec, standard
+                tgt_key_padding_mask=decoder_padding_mask,  # B x T_dec
+                memory_key_padding_mask=encoder_padding_mask,  # B x T_enc
+            )  # -> B x T_dec x hidden
 
 
-        # Add post transformer gating
-        transformer_output_encoder = self.post_lstm_gate_encoder(transformer_encoder_output)
-        transformer_output_encoder = self.post_lstm_add_norm_encoder(
-            transformer_output_encoder, embeddings_varying_encoder
-        )
+            # Add post transformer gating
+            transformer_output_encoder = self.post_lstm_gate_encoder(transformer_encoder_output)
+            transformer_output_encoder = self.post_lstm_add_norm_encoder(
+                transformer_output_encoder, embeddings_varying_encoder
+            )
 
-        transformer_output_decoder = self.post_lstm_gate_decoder(transformer_decoder_output)
-        transformer_output_decoder = self.post_lstm_add_norm_decoder(
-            transformer_output_decoder, embeddings_varying_decoder
-        )
+            transformer_output_decoder = self.post_lstm_gate_decoder(transformer_decoder_output)
+            transformer_output_decoder = self.post_lstm_add_norm_decoder(
+                transformer_output_decoder, embeddings_varying_decoder
+            )
 
-        transformer_output = torch.cat([transformer_output_encoder, transformer_output_decoder], dim=1)
+            transformer_output = torch.cat([transformer_output_encoder, transformer_output_decoder], dim=1)
 
         # --------------------------------------------------------------------
         # Process with the LSTM layer as well
@@ -392,8 +428,12 @@ class PPGRTemporalFusionTransformer(TemporalFusionTransformer):
         # Combine last encoder and decoder outputs
         lstm_output = torch.cat([lstm_output_encoder, lstm_output_decoder], dim=1)
 
-        # Merge transformer and LSTM outputs
-        fused_output = self.transformer_lstm_projection_layer(torch.cat([transformer_output, lstm_output], dim=-1))
+        if self.hparams.use_transformer_encoder_decoder_layers:
+            # Merge transformer and LSTM outputs
+            fused_output = self.transformer_lstm_projection_layer(torch.cat([transformer_output, lstm_output], dim=-1))
+        else:
+            # Use the LSTM outputs as is
+            fused_output = lstm_output
                 
         # static enrichment
         static_context_enrichment = self.static_context_enrichment(static_embedding)
@@ -424,9 +464,9 @@ class PPGRTemporalFusionTransformer(TemporalFusionTransformer):
         if self.n_targets > 1:
             output = []
             for layer in self.output_layer:
-                output.append(conditional_enforce_quantile_monotonicity(layer(output)), self.enforce_quantile_monotonicity)
+                output.append(conditional_enforce_quantile_monotonicity(layer(output), self.hparams.enforce_quantile_monotonicity))
         else:
-            output = conditional_enforce_quantile_monotonicity(self.output_layer(output), self.enforce_quantile_monotonicity)
+            output = conditional_enforce_quantile_monotonicity(self.output_layer(output), self.hparams.enforce_quantile_monotonicity)
 
 
         # Return in same dictionary format

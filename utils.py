@@ -22,6 +22,7 @@ from lightning.pytorch.loggers import WandbLogger
 
 from config import Config
 
+import torch.nn.functional as F
 
 def create_click_options(config_class: Type[Any]) -> Callable:
     """
@@ -43,7 +44,6 @@ def create_click_options(config_class: Type[Any]) -> Callable:
             # Determine the Click parameter type.
             field_type = type_mapping.get(field.type, str)
 
-            # Determine default behavior; if no default is provided, mark as required.
             if field.default is MISSING:
                 option_kwargs = {"required": True, "help": "Required parameter"}
             else:
@@ -53,27 +53,27 @@ def create_click_options(config_class: Type[Any]) -> Callable:
                     "help": f"Default: {field.default}",
                 }
 
-            # Create both hyphenated and underscored option names.
-            hyphen_name = f"--{field.name.replace('_', '-')}"
-            underscore_name = f"--{field.name}"
-            option_names = [hyphen_name, underscore_name]
-
-            # Add any aliases if applicable.
-            if field.name == "debug_mode":
-                option_names.append("--debug")
-
             if field_type == bool:
-                # For booleans, use is_flag.
-                option_kwargs["is_flag"] = True
-                # Remove default from help if needed because click shows flags differently.
-                option_kwargs.pop("default", None)
-                f = click.option(*option_names, **option_kwargs)(f)
+                # Use dual flag syntax: "--field/--no-field" so the default from the config is honored.
+                option_declaration = f"--{field.name.replace('_', '-')}/--no-{field.name.replace('_', '-')}"
+                option_names = [option_declaration]
+                
+                # For special cases, like "debug_mode", add an additional alias if needed.
+                if field.name == "debug_mode":
+                    option_names.append("--debug/--no-debug")
+                
+                # Pass the actual default from the config to click (will be True/False)
+                f = click.option(*option_names, default=field.default, show_default=True,
+                                 help=f"Default: {field.default}")(f)
             else:
+                # Create both hyphenated and underscored option names.
+                hyphen_name = f"--{field.name.replace('_', '-')}"
+                underscore_name = f"--{field.name}"
+                option_names = [hyphen_name, underscore_name]
                 f = click.option(*option_names, type=field_type, **option_kwargs)(f)
         return f
 
     return decorator
-
 
 def set_random_seeds(seed: int = 42) -> None:
     """
@@ -211,6 +211,44 @@ def override_config_from_wandb(config: Config) -> None:
     else:
         logger.warning("wandb.run is not available. Config not overridden.")
 
+def conditional_enforce_quantile_monotonicity(tensor_input: torch.Tensor,
+                                                enforce_quantile_monotonicity: bool = True) -> torch.Tensor:
+    """
+    Enforces quantile monotonicity on the output tensor if requested.
+
+    In some quantile regression setups, the model is designed to predict the _increments_
+    between quantiles rather than the absolute quantile values. To obtain the actual quantile
+    values, we need to perform the following two steps:
+    
+      1. Apply a non-negative activation (e.g., softplus) to the raw outputs so that all increments are ≥ 0.
+      2. Compute the cumulative sum along the quantile dimension to convert increments into absolute quantile values.
+    
+    This ensures that the quantile values are monotonically increasing (i.e., no quantile crossing).
+
+    Args:
+        tensor_input (torch.Tensor): The raw tensor representing quantile increments.
+            Expected shape: [..., num_quantiles]. For example, with an output shape of [70, 8, 7],
+            the last dimension corresponds to the 7 quantile increments. 
+            This is the output of the previous later, and the output of this should be the final layer.
+        enforce_quantile_monotonicity (bool): Flag to enable/disable the monotonicity enforcement.
+            If True, the cumulative sum is applied; if False, the raw output is returned as is.
+
+    Returns:
+        torch.Tensor: The processed tensor containing monotonic quantile values (if enforcement is enabled)
+        or the raw output otherwise.
+    """
+    if enforce_quantile_monotonicity:
+        # Step 1: Ensure the increments are non-negative by applying softplus.
+        # This is important because negative increments could lead to non-monotonic quantile values.
+        non_negative_increments = F.relu(tensor_input)
+        
+        # Step 2: Convert increments into absolute quantile values using a cumulative sum.
+        # The cumulative sum is computed along the last dimension (assumed to be the quantile dimension).
+        output = torch.cumsum(non_negative_increments, dim=-1)
+    else:
+        output = tensor_input
+    
+    return output
 
 # Optional: An example entry point for testing these utilities.
 if __name__ == "__main__":

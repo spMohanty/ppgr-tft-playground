@@ -32,18 +32,30 @@ class Config:
     num_workers: int = 8
 
     # Model hyperparameters
-    learning_rate: float = 1e-4
     
     hidden_size: int = 256
     lstm_layers: int = 1
     dropout: float = 0.15
-    num_quantiles: int = 7 # 7 or 13
+    num_quantiles: int = 13 # 7 or 13 or any odd number > 3
     attention_head_size: int = 4
     hidden_continuous_size: int = 128
+    
+    share_single_variable_networks: bool = True
+    use_transformer_variable_selection_networks: bool = True
+    
+    use_transformer_encoder_decoder_layers: bool = True
+    transformer_encoder_decoder_num_heads: int = 4
+    transformer_encoder_decoder_num_layers: int = 4
+    transformer_encoder_decoder_hidden_size: int = 32
+    
+    enforce_quantile_monotonicity: bool = False
 
     # Trainer parameters
     max_epochs: int = 100  # Early stopping will likely kick in before this.
     gradient_clip_val: float = 0.1
+    
+    optimizer: str = "adamw"
+    learning_rate: float = 1e-4
     lr_weight_decay: float = 0.05
     reduce_lr_on_plateau_reduction: float = 10
     reduce_lr_on_plateau_patience: int = 3
@@ -68,6 +80,7 @@ class Config:
 
     # Performance parameters
     disable_all_plots: bool = False
+    profiler:bool = False
 
 
 if __name__ == "__main__":
@@ -76,3 +89,7 @@ if __name__ == "__main__":
     pprint(config)
     config.quantiles = "asomething"
     pprint(config)
+    
+    print(f"config.share_single_variable_networks : {config.share_single_variable_networks}")
+    print(f"config.use_transformer_variable_selection_networks : {config.use_transformer_variable_selection_networks}")
+    print(f"config.use_transformer_encoder_decoder_layers : {config.use_transformer_encoder_decoder_layers}")

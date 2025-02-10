@@ -35,7 +35,7 @@ def build_callbacks(config: Config) -> (list, PPGRMetricsCallback):
         verbose=False,
         mode=config.early_stop_monitor_metric_mode
     )
-    rich_model_summary = RichModelSummary()
+    rich_model_summary = RichModelSummary(max_depth=2)
     rich_progress_bar = RichProgressBar()
     lr_logger = LearningRateMonitor(
         logging_interval="step",
@@ -70,8 +70,14 @@ def build_callbacks(config: Config) -> (list, PPGRMetricsCallback):
 
 def build_trainer(config: Config, callbacks: list, wandb_logger: WandbLogger) -> pl.Trainer:
     """Instantiate and return the Lightning Trainer."""
+    
+    if config.profiler:
+        profiler = "simple"
+    else:
+        profiler = None
+    
     return pl.Trainer(
-        profiler="simple",
+        profiler=profiler,
         # precision="bf16",
         max_epochs=config.max_epochs,
         accelerator="auto",
@@ -137,11 +143,22 @@ def main(**kwargs):
         hidden_continuous_size=config.hidden_continuous_size,
         output_size=config.num_quantiles,
         
+        share_single_variable_networks=config.share_single_variable_networks,
+        use_transformer_variable_selection_networks=config.use_transformer_variable_selection_networks,
+        
+        use_transformer_encoder_decoder_layers=config.use_transformer_encoder_decoder_layers,
+        transformer_encoder_decoder_num_heads=config.transformer_encoder_decoder_num_heads,
+        transformer_encoder_decoder_num_layers=config.transformer_encoder_decoder_num_layers,
+        transformer_encoder_decoder_hidden_size=config.transformer_encoder_decoder_hidden_size,
+        
+        
+        enforce_quantile_monotonicity=config.enforce_quantile_monotonicity,
+        
         # Loss function
         loss=build_loss(config),        
         
         # Optimizer hyperparameters
-        optimizer="adamw",
+        optimizer=config.optimizer,
         learning_rate=config.learning_rate,
         weight_decay=config.lr_weight_decay,
         reduce_on_plateau_reduction=config.reduce_lr_on_plateau_reduction,
