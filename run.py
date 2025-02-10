@@ -163,7 +163,7 @@ def main(**kwargs):
     trainer.fit(tft_model, train_dataloaders=train_loader, val_dataloaders=val_loader)
 
     # Run testing.
-    trainer.test(tft_model, dataloaders=test_loader)
+    trainer.test(tft_model, dataloaders=test_loader, ckpt_path="best")
 
     # Print final test metrics.
     final_test_metrics = ppgr_metrics_test_callback.final_metrics
