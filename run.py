@@ -85,7 +85,8 @@ def build_trainer(config: Config, callbacks: list, wandb_logger: WandbLogger) ->
         gradient_clip_val=config.gradient_clip_val,
         callbacks=callbacks,
         logger=wandb_logger,
-        val_check_interval=config.val_check_interval
+        val_check_interval=config.val_check_interval,
+        log_every_n_steps=config.trainer_log_every_n_steps,
     )
 
 @click.command()
@@ -158,15 +159,11 @@ def main(**kwargs):
         loss=build_loss(config),        
         
         # Optimizer hyperparameters
-        optimizer=config.optimizer,
-        learning_rate=config.learning_rate,
-        weight_decay=config.lr_weight_decay,
-        reduce_on_plateau_reduction=config.reduce_lr_on_plateau_reduction,
-        reduce_on_plateau_patience=config.reduce_lr_on_plateau_patience,
+        experiment_config=config,
+
         
         # Logging
-        log_interval=config.trainer_log_interval,
-        
+        #log_interval=config.trainer_log_interval,
     )
     logger.info(f"Number of parameters in network: {tft_model.size() / 1e3:.1f}k")
 

@@ -237,7 +237,7 @@ class TransformerVariableSelectionNetwork(nn.Module):
             input_embedding_flags: (Ignored in this implementation.)
             dropout: Dropout probability.
             context_size: If provided, context will be projected and added to a learnable CLS token.
-            single_variable_grns: (Ignored in this implementation.)
+            single_variable_grns: (Ignored in this implementation. - as here All variables are treated as “tokens” in a single attention mechanism)
             prescalers: Optional dict mapping variable names to a prescaler (e.g. an nn.Linear)
                         that should be applied before the main variable embedding.
         """

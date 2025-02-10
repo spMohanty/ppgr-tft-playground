@@ -16,6 +16,8 @@ from pathlib import Path
 import copy
 import math
 
+from dataclasses import asdict
+
 # Third-party imports
 import numpy as np
 import pandas as pd  # Only one import is needed
@@ -62,6 +64,11 @@ from pytorch_forecasting.models.temporal_fusion_transformer.sub_modules import G
 
 from utils import conditional_enforce_quantile_monotonicity
 
+from torch.optim import AdamW
+from torch.optim.lr_scheduler import OneCycleLR
+
+from config import Config
+
 
 class PPGRTemporalFusionTransformer(TemporalFusionTransformer):
     def __init__(
@@ -74,6 +81,8 @@ class PPGRTemporalFusionTransformer(TemporalFusionTransformer):
         use_transformer_variable_selection_networks: bool = False,
         
         enforce_quantile_monotonicity: bool = False,
+        
+        experiment_config: Config = None,
 
         **kwargs,
     ):
@@ -101,6 +110,8 @@ class PPGRTemporalFusionTransformer(TemporalFusionTransformer):
         
         # self.hparams.enforce_quantile_monotonicity = enforce_quantile_monotonicity
         
+        self.hparams.update(asdict(experiment_config))
+        
                 
         # Setup variables needed for the Metrics Callback
         self.training_batch_full_outputs = []
@@ -116,9 +127,39 @@ class PPGRTemporalFusionTransformer(TemporalFusionTransformer):
             logger.info("Setting up transformer encoder decoder layers")
             self.setup_transformer_encoder_decoder_layers()
         
-        logger.info("Using PPGRTemporalFusionTransformer")
-        logger.info(f"self.hparams : {self.hparams}")
+    
+    def configure_optimizers(self):
+        assert self.hparams.optimizer == "adamw", "Only adamw optimizer is supported atm"
+        assert self.hparams.lr_scheduler in ["onecycle", "none"], "Only onecycle scheduler is supported atm or none or auto"
         
+        assert self.hparams.lr_scheduler_max_lr_multiplier >= 1.0, "lr_scheduler_max_lr_multiplier must be >= 1.0"
+        
+        optimizer = AdamW(self.parameters(), 
+                          lr=self.hparams.learning_rate, 
+                          weight_decay=self.hparams.optimizer_weight_decay)
+
+        # estimate total number of training steps
+        total_steps = self.trainer.estimated_stepping_batches
+        
+        lr_scheduler = {}
+        if self.hparams.lr_scheduler == "onecycle":
+            # Configure the OneCycleLR scheduler
+            lr_scheduler = {
+                'scheduler': OneCycleLR(
+                    optimizer,
+                    max_lr=self.hparams.learning_rate * self.hparams.lr_scheduler_max_lr_multiplier,           # Peak learning rate during the cycle
+                    total_steps=total_steps,  # Total number of training steps
+                pct_start=self.hparams.lr_scheduler_pct_start,         # Fraction of steps spent increasing the LR
+                anneal_strategy=self.hparams.lr_scheduler_anneal_strategy, # Cosine annealing for LR decay
+                cycle_momentum=self.hparams.lr_scheduler_cycle_momentum   # Set to True if you wish to cycle momentum
+            ),
+            'interval': 'step',        # Update the scheduler every training step
+        }
+
+        return {
+            "optimizer": optimizer,
+            "lr_scheduler": lr_scheduler
+        }
         
     def setup_transformer_encoder_decoder_layers(self):
         # Instead, create transformer layers:
@@ -491,6 +532,12 @@ class PPGRTemporalFusionTransformer(TemporalFusionTransformer):
         log.update(self.create_log(x, y, out, batch_idx))
         self.training_step_outputs.append(log) # from the base_model.py 
         self.training_batch_full_outputs.append((log, out))
+        
+        # Access and log the current learning rate from the first optimizer's first param group
+        current_lr = self.trainer.optimizers[0].param_groups[0]['lr']
+        self.log("lr", current_lr, on_step=True, on_epoch=True, prog_bar=True, logger=True)
+        
+        
         return log
 
     def validation_step(self, batch, batch_idx):

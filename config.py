@@ -1,4 +1,4 @@
-from dataclasses import dataclass, field
+from dataclasses import dataclass, asdict
 from rich import print as rprint
 from rich.pretty import pprint
 
@@ -28,7 +28,7 @@ class Config:
     no_data_cache: bool = False
 
     # DataLoader parameters
-    batch_size: int = 2048 
+    batch_size: int = 512
     num_workers: int = 8
 
     # Model hyperparameters
@@ -36,9 +36,9 @@ class Config:
     hidden_size: int = 256
     lstm_layers: int = 1
     dropout: float = 0.15
-    num_quantiles: int = 13 # 7 or 13 or any odd number > 3
+    num_quantiles: int = 7 # 7 or 13 or any odd number > 3
     attention_head_size: int = 4
-    hidden_continuous_size: int = 128
+    hidden_continuous_size: int = 32
     
     share_single_variable_networks: bool = True
     use_transformer_variable_selection_networks: bool = True
@@ -51,17 +51,23 @@ class Config:
     enforce_quantile_monotonicity: bool = False
 
     # Trainer parameters
-    max_epochs: int = 100  # Early stopping will likely kick in before this.
+    max_epochs: int = 30  # Early stopping will likely kick in before this.
     gradient_clip_val: float = 0.1
     
-    optimizer: str = "adamw"
+    optimizer: str = "adamw" # cannot change this atm 
+    optimizer_weight_decay: float = 0.05
+
+    lr_scheduler: str = "onecycle" # cannot change this atm 
+    
     learning_rate: float = 1e-4
-    lr_weight_decay: float = 0.05
-    reduce_lr_on_plateau_reduction: float = 10
-    reduce_lr_on_plateau_patience: int = 3
+    lr_scheduler_max_lr_multiplier: float = 1.5 # make the lr 1.5 (multiplier) times in the first 5% of the steps, then slowly decrease until the end of all the epochs
+    lr_scheduler_pct_start: float = 0.05 # should keep it around upto 2.5 epochs for max 30 epochs - kind of a warm up
+    lr_scheduler_anneal_strategy: str = "cos"
+    lr_scheduler_cycle_momentum: bool = False
+    
     
     val_check_interval: float = 0.5
-    trainer_log_interval: int = 1
+    trainer_log_every_n_steps: int = 1
     
     loss: str = "QuantileLoss" # "QuantileLoss" or "ApproximateCRPS" or "RMSE"
 
@@ -69,7 +75,7 @@ class Config:
     early_stop_monitor_metric: str = "val_loss"
     early_stop_monitor_metric_mode: str = "min"
     early_stop_patience: int = 10
-    early_stop_min_delta: float = 1e-8
+    early_stop_min_delta: float = 1e-6
 
     # Checkpoint parameters
     disable_checkpoints: bool = True
@@ -90,6 +96,4 @@ if __name__ == "__main__":
     config.quantiles = "asomething"
     pprint(config)
     
-    print(f"config.share_single_variable_networks : {config.share_single_variable_networks}")
-    print(f"config.use_transformer_variable_selection_networks : {config.use_transformer_variable_selection_networks}")
-    print(f"config.use_transformer_encoder_decoder_layers : {config.use_transformer_encoder_decoder_layers}")
+    print(asdict(config))
