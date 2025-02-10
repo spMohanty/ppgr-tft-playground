@@ -1,4 +1,8 @@
 import os
+
+# Enable expandable segments for PyTorch
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+
 import numpy as np
 import torch
 from loguru import logger

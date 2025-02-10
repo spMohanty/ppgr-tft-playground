@@ -151,6 +151,7 @@ class PPGRTemporalFusionTransformer(TemporalFusionTransformer):
         super().__init__(**kwargs)
         
         # Setup variables needed for the Metrics Callback
+        self.training_batch_full_outputs = []
         self.validation_batch_full_outputs = []
         self.test_batch_full_outputs = []
         
@@ -395,11 +396,24 @@ class PPGRTemporalFusionTransformer(TemporalFusionTransformer):
             decoder_lengths=decoder_lengths,
             encoder_lengths=encoder_lengths,
         )
+        
+    def training_step(self, batch, batch_idx):
+        """
+        Training step: processes a training batch, updates logging, and stores outputs.
+        """
+        self.training_batch_full_outputs = [] # only retain the data of the last batch
+        x, y = batch
+        log, out = self.step(x, y, batch_idx)
+        log.update(self.create_log(x, y, out, batch_idx))
+        self.training_step_outputs.append(log) # from the base_model.py 
+        self.training_batch_full_outputs.append((log, out))
+        return log
 
     def validation_step(self, batch, batch_idx):
         """
         Validation step: processes a validation batch, updates logging, and stores outputs.
         """
+        self.validation_batch_full_outputs = [] # only retain the data of the last batch
         x, y = batch
         log, out = self.step(x, y, batch_idx)
         log.update(self.create_log(x, y, out, batch_idx))
@@ -412,7 +426,7 @@ class PPGRTemporalFusionTransformer(TemporalFusionTransformer):
         Test step: processes a test batch, updates logging, and stores outputs.
         """
         # Clear previous test outputs.
-        self.test_batch_full_outputs = []        
+        self.test_batch_full_outputs = [] # only retain the data of the last batch
         x, y = batch
         log, out = self.step(x, y, batch_idx)
         log.update(self.create_log(x, y, out, batch_idx))

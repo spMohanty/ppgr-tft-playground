@@ -110,7 +110,8 @@ class PPGRMetricsCallback(pl.Callback):
         self.reset_metrics()
 
     def reset_metrics(self):
-        self.all_predictions = []
+        self.all_point_predictions = []
+        self.all_quantile_predictions = []
         self.all_targets = []
         self.all_encoder_values = []
         self.raw_batch_data = []
@@ -123,9 +124,10 @@ class PPGRMetricsCallback(pl.Callback):
         if predictions.shape[-1] == 1:
             point_forecast = predictions[:, :, 0]
         else:
-            median_quantile_index = 3  # Use median quantile for point forecasts.
+            median_quantile_index = predictions.shape[-1] // 2  # Calculate median index dynamically
             point_forecast = predictions[:, :, median_quantile_index]
-        self.all_predictions.append(point_forecast)
+        self.all_point_predictions.append(point_forecast)
+        self.all_quantile_predictions.append(predictions)
         self.all_targets.append(past_data["decoder_target"])
         self.all_encoder_values.append(past_data["encoder_target"])
         self.raw_batch_data.append(batch)
@@ -133,7 +135,9 @@ class PPGRMetricsCallback(pl.Callback):
 
     def _get_last_batch_output(self, pl_module) -> Tuple[Any, Any]:
         """Retrieve the last batch output based on the current mode."""
-        if self.mode == "val":
+        if self.mode == "train":
+            return pl_module.training_batch_full_outputs[-1]
+        elif self.mode == "val":
             return pl_module.validation_batch_full_outputs[-1]
         elif self.mode == "test":
             return pl_module.test_batch_full_outputs[-1]
@@ -149,8 +153,13 @@ class PPGRMetricsCallback(pl.Callback):
         if self.mode == "test":
             _, batch_outputs = self._get_last_batch_output(pl_module)
             self._process_batch(pl_module, batch, batch_outputs)
+            
+    def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx=0):
+        if self.mode == "train":
+            _, batch_outputs = self._get_last_batch_output(pl_module)
+            self._process_batch(pl_module, batch, batch_outputs)
 
-    def plot_predictions(self, trainer, pl_module, batch_index_to_use: int = 0):
+    def plot_predictions(self, pl_module, batch_index_to_use: int = 0):
         if self.disable_all_plots:
             return
 
@@ -163,7 +172,7 @@ class PPGRMetricsCallback(pl.Callback):
 
         for idx in self.plot_indices:
             fig = pl_module.plot_prediction(past_data, prediction_outputs, idx)
-            trainer.logger.experiment.log({f"predictions_sample_{idx}": wandb.Image(fig)})
+            self.trainer.logger.experiment.log({f"predictions_sample_{idx}": wandb.Image(fig)})
 
     def plot_metric_scatter(self, metric_type: str, metrics_data: dict, metric_correlations: dict, max_points: int = 10000):
         """
@@ -233,24 +242,74 @@ class PPGRMetricsCallback(pl.Callback):
         plt.tight_layout()
         plt.close(fig)
         return fig
+    
+    def compute_monotonicity_violation_metrics(self, outputs: torch.Tensor):
+        """
+        Computes three monotonicity metrics for quantile outputs.
+        
+        Args:
+            outputs (torch.Tensor): Tensor of shape [batch, forecast_horizon, num_quantiles].
+                                    The quantiles are assumed to be ordered along the last dimension.
+                                    
+        Returns:
+            dict: A dictionary containing the following metrics:
+                - "mean_violation" (torch.Tensor): The mean monotonicity violation averaged over batch and forecast horizon.
+                - "violation_rate" (torch.Tensor): The fraction of quantile pairs (per forecast point) that violate monotonicity.
+                - "max_violation" (torch.Tensor): The maximum violation observed across the batch and forecast horizon.
+        """
+        # Compute differences between adjacent quantiles.
+        # For each forecast point, we expect: q1 <= q2 <= ... <= q_num_quantiles.
+        # diff > 0 indicates a violation (i.e., q_j > q_{j+1}).
+        diff = outputs[..., :-1] - outputs[..., 1:]  # shape: [batch, horizon, num_quantiles - 1]
 
-    def _compute_metrics(self) -> Dict[str, torch.Tensor]:
-        all_preds = torch.cat(self.all_predictions, dim=0)
+        # Only positive differences are violations.
+        violation = torch.relu(diff)  # same shape as diff
+
+        # Mean violation: sum the violation values for each forecast point and average over all points.
+        # This gives an idea of the average "amount" by which quantile order is violated.
+        mean_violation = violation.sum(dim=-1).mean()  # scalar
+
+        # Violation rate: count how many adjacent pairs are violating the order and average.
+        # This gives a fraction between 0 and 1.
+        total_pairs = outputs.shape[-1] - 1
+        violation_rate = ((diff > 0).float().sum(dim=-1) / total_pairs).mean()  # scalar
+
+        # Maximum violation: the largest single violation value observed.
+        max_violation = violation.max()  # scalar
+
+        return {
+            "mean_violation": mean_violation,
+            "violation_rate": violation_rate,
+            "max_violation": max_violation
+        }
+    
+
+    def _compute_metrics(self, pl_module: Any = None, plot: bool = True, log: bool = True) -> Dict[str, torch.Tensor]:
+        all_preds = torch.cat(self.all_point_predictions, dim=0)
+        all_quantile_preds = torch.cat(self.all_quantile_predictions, dim=0)
         all_targets = torch.cat(self.all_targets, dim=0)
         all_encoder_values = torch.cat(self.all_encoder_values, dim=0)
-
+        
         iauc_metrics = compute_iauc_metrics(all_targets, all_preds, all_encoder_values)
         auc_metrics = compute_auc_metrics(all_targets, all_preds, all_encoder_values)
         raw_cgm_metrics = {
             "predictions": {"raw_cgm": all_preds.flatten()},
             "ground_truth": {"raw_cgm": all_targets.flatten()}
         }
+        
+        monotonicity_violation_metrics = self.compute_monotonicity_violation_metrics(all_quantile_preds)
 
+        prefix = f"{self.mode}_q-monotonicity_violation_"
+        metric_monotonicity_violations = { f"{prefix}{key}": value
+            for key, value in monotonicity_violation_metrics.items()
+        }
+        
         # Save metrics for plotting
-        self.metrics_data = {
+        all_metrics_data = {
             'iauc': iauc_metrics,
             'auc': auc_metrics,
-            'cgm': raw_cgm_metrics
+            'cgm': raw_cgm_metrics,
+            'q-monotonicity_violation': metric_monotonicity_violations
         }
 
         # Make sure the correlation function is on the same device as the metrics
@@ -267,27 +326,40 @@ class PPGRMetricsCallback(pl.Callback):
             for corr_dict in [iauc_corr, auc_corr, cgm_corr]
             for key, value in corr_dict.items()
         }
+        all_metrics_data.update(metric_correlations)
 
-        # Create and log scatter plots for each metric type
-        for metric_type in ['iauc', 'auc', 'cgm']:
-            scatter_fig = self.plot_metric_scatter(metric_type, self.metrics_data, metric_correlations)
-            if scatter_fig:
-                self.trainer.logger.experiment.log({
-                    f"{self.mode}_{metric_type}_scatter": wandb.Image(scatter_fig)
-                })
-                plt.close(scatter_fig)
+        if plot:
+            # Create and log scatter plots for each metric type
+            for metric_type in ['iauc', 'auc', 'cgm']:
+                scatter_fig = self.plot_metric_scatter(metric_type, all_metrics_data, metric_correlations)
+                if scatter_fig:
+                    self.trainer.logger.experiment.log({
+                        f"{self.mode}_{metric_type}_scatter": wandb.Image(scatter_fig)
+                    })
+                    plt.close(scatter_fig)
+                    
+            # Plot predictions
+            self.plot_predictions(pl_module)
+            
+        if log:            
+            # Log all correlation metrics
+            for key, value in metric_correlations.items():
+                pl_module.log(key, value, prog_bar=True, sync_dist=True)
+                
+            # log all monotonicity violation metrics
+            for key, value in metric_monotonicity_violations.items():
+                pl_module.log(key, value, prog_bar=True, sync_dist=True)
+            
+
+            
         return metric_correlations
 
-    def _handle_epoch_end(self, trainer, pl_module):
+    def _handle_epoch_end(self, trainer, pl_module, plot: bool = True):
         """
         Common logic to run at the end of an epoch (either validation or test).
         """
         self.trainer = trainer
-        final_metrics = self._compute_metrics()
-        for key, value in final_metrics.items():
-            pl_module.log(key, value, prog_bar=True, sync_dist=True)
-        self.plot_predictions(trainer, pl_module)
-        self.final_metrics = final_metrics
+        self.final_metrics = self._compute_metrics(pl_module, plot=plot)
         self.reset_metrics()
 
     def on_validation_epoch_end(self, trainer, pl_module):
@@ -297,6 +369,12 @@ class PPGRMetricsCallback(pl.Callback):
     def on_test_epoch_end(self, trainer, pl_module):
         if self.mode == "test":
             self._handle_epoch_end(trainer, pl_module)
+            
+    def on_train_epoch_end(self, trainer, pl_module):
+        if self.mode == "train":
+            # disable plotting for training for performance reasons
+            # todo: make this configurable - could be helpful for debugging 
+            self._handle_epoch_end(trainer, pl_module, plot=False)
 
 if __name__ == "__main__":
     # Define dummy classes to mimic Trainer and Module behavior.
