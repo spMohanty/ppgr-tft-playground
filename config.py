@@ -28,7 +28,7 @@ class Config:
     no_data_cache: bool = False
 
     # DataLoader parameters
-    batch_size: int = 512
+    batch_size: int = 1024
     num_workers: int = 8
 
     # Model hyperparameters
@@ -38,7 +38,7 @@ class Config:
     dropout: float = 0.15
     num_quantiles: int = 7 # 7 or 13 or any odd number > 3
     attention_head_size: int = 4
-    hidden_continuous_size: int = 32
+    hidden_continuous_size: int = 128
     
     share_single_variable_networks: bool = True
     use_transformer_variable_selection_networks: bool = True
