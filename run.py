@@ -51,8 +51,10 @@ def build_callbacks(config: Config) -> (list, PPGRMetricsCallback):
         lr_logger,
         ppgr_metrics_val_callback,
         ppgr_metrics_test_callback,
-        early_stop_callback
     ]
+    
+    if config.early_stop_enabled:
+        callbacks.append(early_stop_callback)
 
     if not config.disable_checkpoints:
         logger.info(f"Using checkpoint directory: {config.checkpoint_dir}")

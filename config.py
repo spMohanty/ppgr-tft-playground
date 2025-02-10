@@ -61,7 +61,7 @@ class Config:
     
     learning_rate: float = 1e-4
     lr_scheduler_max_lr_multiplier: float = 1.5 # make the lr 1.5 (multiplier) times in the first 5% of the steps, then slowly decrease until the end of all the epochs
-    lr_scheduler_pct_start: float = 0.05 # should keep it around upto 2.5 epochs for max 30 epochs - kind of a warm up
+    lr_scheduler_pct_start: float = 0.1 # should keep it around upto 2.5 epochs for max 30 epochs - kind of a warm up
     lr_scheduler_anneal_strategy: str = "cos"
     lr_scheduler_cycle_momentum: bool = False
     
@@ -72,6 +72,7 @@ class Config:
     loss: str = "QuantileLoss" # "QuantileLoss" or "ApproximateCRPS" or "RMSE"
 
     # Early stopping parameters
+    early_stop_enabled: bool = False
     early_stop_monitor_metric: str = "val_loss"
     early_stop_monitor_metric_mode: str = "min"
     early_stop_patience: int = 10
