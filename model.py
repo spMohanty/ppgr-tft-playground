@@ -61,7 +61,7 @@ from sub_modules import (
     PreNormResidualBlock
 )
 
-from sub_modules import GatedResidualNetwork, GatedLinearUnit, AddNorm
+from sub_modules import GatedLinearUnit, AddNorm
 
 # from pytorch_forecasting.models.temporal_fusion_transformer.sub_modules import GatedResidualNetwork, GatedLinearUnit, AddNorm
 
@@ -106,6 +106,46 @@ class PPGRTemporalFusionTransformer(TemporalFusionTransformer):
         
         if not self.hparams.use_lstm_encoder_decoder_layers:
             self.clean_up_lstm_encoder_decoder_layers()
+        
+        self.setup_static_context_encoders()
+    
+    def setup_static_context_encoders(self):
+        ## Static Encoders
+        # for variable selection
+        self.static_context_variable_selection = PreNormResidualBlock(
+            input_dim=self.hparams.hidden_size,
+            hidden_dim=self.hparams.hidden_size,
+            output_dim=self.hparams.hidden_size,
+            dropout=self.hparams.dropout,
+            context_dim=None,
+        )
+        
+        # for post lstm static enrichment
+        self.static_context_enrichment = PreNormResidualBlock(
+            input_dim=self.hparams.hidden_size,
+            hidden_dim=self.hparams.hidden_size,
+            output_dim=self.hparams.hidden_size,
+            dropout=self.hparams.dropout,
+            context_dim=None,
+        )
+        
+        # static enrichment and processing past LSTM
+        self.static_enrichment = PreNormResidualBlock(
+            input_dim=self.hparams.hidden_size,
+            hidden_dim=self.hparams.hidden_size,
+            output_dim=self.hparams.hidden_size,
+            dropout=self.hparams.dropout,
+            context_dim=self.hparams.hidden_size,
+        )
+        
+        self.pos_wise_ff = PreNormResidualBlock(
+            input_dim=self.hparams.hidden_size,
+            hidden_dim=self.hparams.hidden_size,
+            output_dim=self.hparams.hidden_size,
+            dropout=self.hparams.dropout,
+            context_dim=None,
+        )
+            
     
     def configure_optimizers(self):
         assert self.hparams.optimizer == "adamw", "Only adamw optimizer is supported atm"

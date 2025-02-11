@@ -6,6 +6,7 @@ from typing import Dict, Tuple, Optional
 from copy import deepcopy
 
 from pytorch_forecasting.models.temporal_fusion_transformer.sub_modules import TimeDistributedInterpolation
+
 class GatedLinearUnit(nn.Module):
     def __init__(self, input_size: int, hidden_size: int = None, dropout: float = 0.0):
         """
