@@ -58,9 +58,13 @@ from sub_modules import (
     GatedTransformerLSTMProjectionUnit,
     TransformerVariableSelectionNetwork,
     PatchedVariableSelectionNetwork,
+    PreNormResidualBlock
 )
 
-from pytorch_forecasting.models.temporal_fusion_transformer.sub_modules import GatedResidualNetwork, GatedLinearUnit, AddNorm
+from sub_modules import GatedResidualNetwork, GatedLinearUnit, AddNorm
+
+# from pytorch_forecasting.models.temporal_fusion_transformer.sub_modules import GatedResidualNetwork, GatedLinearUnit, AddNorm
+
 
 from utils import conditional_enforce_quantile_monotonicity
 
@@ -100,6 +104,8 @@ class PPGRTemporalFusionTransformer(TemporalFusionTransformer):
             logger.info("Setting up transformer encoder decoder layers")
             self.setup_transformer_encoder_decoder_layers()
         
+        if not self.hparams.use_lstm_encoder_decoder_layers:
+            self.clean_up_lstm_encoder_decoder_layers()
     
     def configure_optimizers(self):
         assert self.hparams.optimizer == "adamw", "Only adamw optimizer is supported atm"
@@ -133,6 +139,18 @@ class PPGRTemporalFusionTransformer(TemporalFusionTransformer):
             "optimizer": optimizer,
             "lr_scheduler": lr_scheduler
         }
+        
+    def clean_up_lstm_encoder_decoder_layers(self):
+        self.static_context_initial_hidden_lstm = None
+        self.static_context_initial_cell_lstm = None
+        self.lstm_encoder = None
+        self.lstm_decoder = None
+        self.post_lstm_gate_encoder = None
+        self.post_lstm_gate_decoder = None
+        self.post_lstm_add_norm_encoder = None
+        self.post_lstm_add_norm_decoder = None
+        # empty cuda cache
+        torch.cuda.empty_cache() # called only once at the beginning, so not that big of a deal
         
     def setup_transformer_encoder_decoder_layers(self):
         # Instead, create transformer layers:
@@ -170,13 +188,12 @@ class PPGRTemporalFusionTransformer(TemporalFusionTransformer):
         )
         self.post_transformer_add_norm_decoder = self.post_transformer_add_norm_encoder
         
-        
-        self.transformer_lstm_projection_layer = GatedTransformerLSTMProjectionUnit(
-            hidden_size=self.hparams.hidden_size,
-            dropout=self.hparams.dropout
-        )
-        
-        
+        if self.hparams.use_lstm_encoder_decoder_layers:
+            # Only create the projection layer if we are using LSTM encoder/decoder layers
+            self.transformer_lstm_projection_layer = GatedTransformerLSTMProjectionUnit(
+                hidden_size=self.hparams.hidden_size,
+                dropout=self.hparams.dropout
+            )
 
     def setup_variable_selection_networks(self):
         # variable selection
@@ -241,21 +258,37 @@ class PPGRTemporalFusionTransformer(TemporalFusionTransformer):
         # create single variable grns that are shared across decoder and encoder
         if self.hparams.share_single_variable_networks:
             self.shared_single_variable_grns = nn.ModuleDict()
+            # for name, input_size in encoder_input_sizes.items():
+            #     self.shared_single_variable_grns[name] = GatedResidualNetwork(
+            #         input_size,
+            #         min(input_size, self.hparams.hidden_size),
+            #         self.hparams.hidden_size,
+            #         self.hparams.dropout,
+            #     )
+            # for name, input_size in decoder_input_sizes.items():
+            #     if name not in self.shared_single_variable_grns:
+            #         self.shared_single_variable_grns[name] = GatedResidualNetwork(
+            #             input_size,
+            #             min(input_size, self.hparams.hidden_size),
+            #             self.hparams.hidden_size,
+            #             self.hparams.dropout,
+            #         )
             for name, input_size in encoder_input_sizes.items():
-                self.shared_single_variable_grns[name] = GatedResidualNetwork(
-                    input_size,
-                    min(input_size, self.hparams.hidden_size),
-                    self.hparams.hidden_size,
-                    self.hparams.dropout,
+                self.shared_single_variable_grns[name] = PreNormResidualBlock(
+                    input_dim=input_size,
+                    hidden_dim=min(input_size, self.hparams.hidden_size),
+                    output_dim=self.hparams.hidden_size,
+                    dropout=self.hparams.dropout,
                 )
             for name, input_size in decoder_input_sizes.items():
                 if name not in self.shared_single_variable_grns:
-                    self.shared_single_variable_grns[name] = GatedResidualNetwork(
-                        input_size,
-                        min(input_size, self.hparams.hidden_size),
-                        self.hparams.hidden_size,
-                        self.hparams.dropout,
+                    self.shared_single_variable_grns[name] = PreNormResidualBlock(
+                        input_dim=input_size,
+                        hidden_dim=min(input_size, self.hparams.hidden_size),
+                        output_dim=self.hparams.hidden_size,
+                        dropout=self.hparams.dropout,
                     )
+
 
         self.encoder_variable_selection = VariableSelectionNetwork(
             input_sizes=encoder_input_sizes,
@@ -400,71 +433,77 @@ class PPGRTemporalFusionTransformer(TemporalFusionTransformer):
             )  # -> B x T_dec x hidden
 
 
-        # Add post transformer gating
-        transformer_output_encoder = self.post_transformer_gate_encoder(transformer_encoder_output)
-        transformer_output_encoder = self.post_transformer_add_norm_encoder(
-            transformer_output_encoder, embeddings_varying_encoder
-        )
+            # Add post transformer gating
+            transformer_output_encoder = self.post_transformer_gate_encoder(transformer_encoder_output)
+            transformer_output_encoder = self.post_transformer_add_norm_encoder(
+                transformer_output_encoder, embeddings_varying_encoder
+            )
 
-        transformer_output_decoder = self.post_transformer_gate_decoder(transformer_decoder_output)
-        transformer_output_decoder = self.post_transformer_add_norm_decoder(
-            transformer_output_decoder, embeddings_varying_decoder
-        )
+            transformer_output_decoder = self.post_transformer_gate_decoder(transformer_decoder_output)
+            transformer_output_decoder = self.post_transformer_add_norm_decoder(
+                transformer_output_decoder, embeddings_varying_decoder
+            )
 
-        transformer_output = torch.cat([transformer_output_encoder, transformer_output_decoder], dim=1)
-
-        # --------------------------------------------------------------------
-        # Process with the LSTM layer as well
-        # --------------------------------------------------------------------        
-        # calculate initial state
-        input_hidden = self.static_context_initial_hidden_lstm(static_embedding).expand(
-            self.hparams.lstm_layers, -1, -1
-        )
-        input_cell = self.static_context_initial_cell_lstm(static_embedding).expand(
-            self.hparams.lstm_layers, -1, -1
-        )
+            transformer_output = torch.cat([transformer_output_encoder, transformer_output_decoder], dim=1)
 
 
-        # run local encoder
-        lstm_encoder_output, (hidden, cell) = self.lstm_encoder(
-            embeddings_varying_encoder,
-            (input_hidden, input_cell),
-            lengths=encoder_lengths,
-            enforce_sorted=False,
-        )
+        if self.hparams.use_lstm_encoder_decoder_layers:
+            # --------------------------------------------------------------------
+            # Process with the LSTM layer as well
+            # --------------------------------------------------------------------        
+            # calculate initial state
+            input_hidden = self.static_context_initial_hidden_lstm(static_embedding).expand(
+                self.hparams.lstm_layers, -1, -1
+            )
+            input_cell = self.static_context_initial_cell_lstm(static_embedding).expand(
+                self.hparams.lstm_layers, -1, -1
+            )
 
-        # run local decoder
-        lstm_decoder_output, _ = self.lstm_decoder(
-            embeddings_varying_decoder,
-            (hidden, cell),
-            lengths=decoder_lengths,
-            enforce_sorted=False,
-        )
-    
-    
-        lstm_output_encoder = self.post_lstm_gate_encoder(lstm_encoder_output)
-        lstm_output_encoder = self.post_lstm_add_norm_encoder(
-            lstm_output_encoder, embeddings_varying_encoder
-        )
 
-        lstm_output_decoder = self.post_lstm_gate_decoder(lstm_decoder_output)
-        lstm_output_decoder = self.post_lstm_add_norm_decoder(
-            lstm_output_decoder, embeddings_varying_decoder
-        )
+            # run local encoder
+            lstm_encoder_output, (hidden, cell) = self.lstm_encoder(
+                embeddings_varying_encoder,
+                (input_hidden, input_cell),
+                lengths=encoder_lengths,
+                enforce_sorted=False,
+            )
 
-        # Combine last encoder and decoder outputs
-        lstm_output = torch.cat([lstm_output_encoder, lstm_output_decoder], dim=1)
+            # run local decoder
+            lstm_decoder_output, _ = self.lstm_decoder(
+                embeddings_varying_decoder,
+                (hidden, cell),
+                lengths=decoder_lengths,
+                enforce_sorted=False,
+            )
+        
+        
+            lstm_output_encoder = self.post_lstm_gate_encoder(lstm_encoder_output)
+            lstm_output_encoder = self.post_lstm_add_norm_encoder(
+                lstm_output_encoder, embeddings_varying_encoder
+            )
 
-        if self.hparams.use_transformer_encoder_decoder_layers:
+            lstm_output_decoder = self.post_lstm_gate_decoder(lstm_decoder_output)
+            lstm_output_decoder = self.post_lstm_add_norm_decoder(
+                lstm_output_decoder, embeddings_varying_decoder
+            )
+
+            # Combine last encoder and decoder outputs
+            lstm_output = torch.cat([lstm_output_encoder, lstm_output_decoder], dim=1)
+
+
+        if self.hparams.use_transformer_encoder_decoder_layers and self.hparams.use_lstm_encoder_decoder_layers:
             # Merge transformer and LSTM outputs
-            fused_output = self.transformer_lstm_projection_layer(torch.cat([transformer_output, lstm_output], dim=-1))
+            fused_encoder_decoder_output = self.transformer_lstm_projection_layer(torch.cat([transformer_output, lstm_output], dim=-1))
+        elif self.hparams.use_lstm_encoder_decoder_layers and not self.hparams.use_transformer_encoder_decoder_layers:
+            # When: LSTM is used but not transformer based encoder-decoder: Use the LSTM outputs as is
+            fused_encoder_decoder_output = lstm_output
         else:
-            # Use the LSTM outputs as is
-            fused_output = lstm_output
+            # When: Transformer is used but not LSTM based encoder-decoder: Use the transformer outputs as is
+            fused_encoder_decoder_output = transformer_output
                 
         # static enrichment
         static_context_enrichment = self.static_context_enrichment(static_embedding)
-        attn_input = self.static_enrichment(fused_output,
+        attn_input = self.static_enrichment(fused_encoder_decoder_output,
                                             self.expand_static_context(
                                                 static_context_enrichment, 
                                                 timesteps))
@@ -484,7 +523,7 @@ class PPGRTemporalFusionTransformer(TemporalFusionTransformer):
         )
         output = self.pos_wise_ff(attn_output)
         output = self.pre_output_gate_norm(
-            output, fused_output[:, max_encoder_length:]
+            output, fused_encoder_decoder_output[:, max_encoder_length:]
         )
         
         # Ensure the final output layer always runs in full precision

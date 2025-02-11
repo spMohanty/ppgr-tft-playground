@@ -1,11 +1,205 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Dict, Tuple
+from typing import Dict, Tuple, Optional
 
 from copy import deepcopy
 
-from pytorch_forecasting.models.temporal_fusion_transformer.sub_modules import GatedResidualNetwork, ResampleNorm
+from pytorch_forecasting.models.temporal_fusion_transformer.sub_modules import TimeDistributedInterpolation
+class GatedLinearUnit(nn.Module):
+    def __init__(self, input_size: int, hidden_size: int = None, dropout: float = 0.0):
+        """
+        Applies a linear layer followed by dropout and then splits the output
+        into two halves. which is then gated by a GLU activation.
+        """
+        super().__init__()
+        
+        self.input_size = input_size
+        self.hidden_size = hidden_size or input_size
+        self.fc = nn.Linear(input_size,  self.hidden_size * 2)
+        self.dropout = nn.Dropout(dropout) if dropout > 0.0 else nn.Identity()
+        
+        self.reset_parameters()
+
+    def reset_parameters(self):
+        nn.init.xavier_uniform_(self.fc.weight)
+        if self.fc.bias is not None:
+            nn.init.zeros_(self.fc.bias)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.dropout(x)
+        x = self.fc(x)
+        x = F.glu(x, dim=-1)
+        return x
+
+class AddNorm(nn.Module):
+    def __init__(
+        self, input_size: int, skip_size: int = None, dropout: float = 0.0, trainable_add: bool = True
+    ):
+        super().__init__()
+
+        self.input_size = input_size
+        self.trainable_add = trainable_add
+        self.skip_size = skip_size or input_size
+        self.dropout = nn.Dropout(dropout) if dropout > 0.0 else nn.Identity()
+        if self.input_size != self.skip_size:
+            self.resample = TimeDistributedInterpolation(
+                self.input_size, batch_first=True, trainable=False
+            )
+
+        if self.trainable_add:
+            self.mask = nn.Parameter(torch.zeros(self.input_size, dtype=torch.float))
+            self.gate = nn.Sigmoid()
+        self.norm = nn.LayerNorm(self.input_size)
+
+    def forward(self, x: torch.Tensor, skip: torch.Tensor):
+        if self.input_size != self.skip_size:
+            skip = self.resample(skip)
+
+        if self.trainable_add:
+            skip = skip * self.gate(self.mask) * 2.0
+
+        output = self.norm(x + skip)
+        return output
+
+# A helper module to “resample” a tensor (via a linear projection) and then normalize it.
+class ResampleNorm(nn.Module):
+    def __init__(self, in_features: int, out_features: int):
+        super().__init__()
+        self.linear = nn.Linear(in_features, out_features)
+        self.norm = nn.LayerNorm(out_features)
+        self.reset_parameters()
+
+    def reset_parameters(self):
+        nn.init.kaiming_normal_(self.linear.weight, nonlinearity="leaky_relu")
+        if self.linear.bias is not None:
+            nn.init.zeros_(self.linear.bias)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.norm(self.linear(x))
+
+# The GateAddNorm module combines a GLU and an AddNorm.
+class GateAddNorm(nn.Module):
+    def __init__(
+        self,
+        input_size: int,
+        hidden_size: Optional[int] = None,
+        skip_size: Optional[int] = None,
+        trainable_add: bool = False,
+        dropout: float = 0.0,
+    ):
+        """
+        First applies a GatedLinearUnit, then adds the skip connection
+        and normalizes the result.
+        """
+        super().__init__()
+        hidden_size = hidden_size or input_size
+        skip_size = skip_size or hidden_size
+        self.glu = GatedLinearUnit(input_size, hidden_size, dropout)
+        self.add_norm = AddNorm(hidden_size, skip_size, dropout, trainable_add)
+
+    def forward(self, x: torch.Tensor, skip: torch.Tensor) -> torch.Tensor:
+        return self.add_norm(self.glu(x), skip)
+
+# The GatedResidualNetwork uses two fully-connected layers, optional context injection,
+# and a gated add-norm block to combine a residual with a learned transformation.
+class GatedResidualNetwork(nn.Module):
+    def __init__(
+        self,
+        input_size: int,
+        hidden_size: int,
+        output_size: int,
+        dropout: float = 0.1,
+        context_size: Optional[int] = None,
+        use_residual: bool = False,
+    ):
+        """
+        If no residual connection is desired (or if the sizes differ), a resampling
+        layer is used to project the residual to the correct dimension.
+        """
+        super().__init__()
+        self.input_size = input_size
+        self.output_size = output_size
+        self.hidden_size = hidden_size
+        self.context_size = context_size
+        self.use_residual = use_residual
+
+        # Determine the size of the residual connection.
+        residual_size = input_size if (input_size != output_size and not use_residual) else output_size
+        self.resample_norm = ResampleNorm(residual_size, output_size) if output_size != residual_size else nn.Identity()
+
+        # The main path
+        self.fc1 = nn.Linear(input_size, hidden_size)
+        self.activation = nn.ELU()
+        if context_size is not None:
+            self.context_layer = nn.Linear(context_size, hidden_size, bias=False)
+        else:
+            self.context_layer = None
+        self.fc2 = nn.Linear(hidden_size, hidden_size)
+
+        self.gate_norm = GateAddNorm(
+            input_size=hidden_size,
+            hidden_size=output_size,
+            skip_size=output_size,
+            dropout=dropout,
+            trainable_add=False,
+        )
+
+        self.init_weights()
+
+    def init_weights(self):
+        # Use our favorite initialization schemes
+        for name, param in self.named_parameters():
+            if "bias" in name:
+                nn.init.zeros_(param)
+            elif "fc1" in name or "fc2" in name:
+                nn.init.kaiming_normal_(param, a=0, mode="fan_in", nonlinearity="leaky_relu")
+            elif "context_layer" in name:
+                nn.init.xavier_uniform_(param)
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        context: Optional[torch.Tensor] = None,
+        residual: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        if residual is None:
+            residual = x
+        residual = self.resample_norm(residual)
+        x = self.fc1(x)
+        if self.context_layer is not None and context is not None:
+            x = x + self.context_layer(context)
+        x = self.activation(x)
+        x = self.fc2(x)
+        return self.gate_norm(x, residual)
+
+class PreNormResidualBlock(nn.Module):
+    """
+    A pre-norm residual block that applies LayerNorm before the two-layer feed-forward
+    network. Uses GELU activation and dropout.
+    """
+    def __init__(self, input_dim: int, hidden_dim: int, output_dim: int, context_dim: int = None, dropout: float = 0.1):
+        super().__init__()
+        self.norm1 = nn.LayerNorm(input_dim)
+        self.fc1 = nn.Linear(input_dim, hidden_dim)
+        self.act = nn.GELU()
+        self.fc2 = nn.Linear(hidden_dim, output_dim)
+        self.dropout = nn.Dropout(dropout)
+        
+        self.context_layer = nn.Linear(context_dim, hidden_dim) if context_dim is not None else None
+    
+    def forward(self, x: torch.Tensor, context: torch.Tensor = None) -> torch.Tensor:
+        # Apply layer norm before feed-forward block
+        x_norm = self.norm1(x)
+        hidden = self.fc1(x_norm)
+        if context is not None:
+            hidden = hidden + self.context_layer(context)
+        hidden = self.act(hidden)
+        hidden = self.dropout(hidden)
+        out = self.fc2(hidden)
+        out = self.dropout(out)
+        return x + out  # residual connection
+
 
 class SharedTransformerEncoder(nn.Module):
     def __init__(self, layer: nn.TransformerEncoderLayer, num_layers: int):
@@ -234,7 +428,7 @@ class TransformerVariableSelectionNetwork(nn.Module):
         Args:
             input_sizes: Dictionary mapping variable names to their input dimensions.
             hidden_size: The hidden dimension (this is used as the transformer model dimension).
-            input_embedding_flags: (Ignored in this implementation.)
+            input_embedding_flags: (Ignored in this implementation, but left here for compatibility with the original code.)
             dropout: Dropout probability.
             context_size: If provided, context will be projected and added to a learnable CLS token.
             single_variable_grns: (Ignored in this implementation. - as here All variables are treated as “tokens” in a single attention mechanism)
@@ -268,8 +462,8 @@ class TransformerVariableSelectionNetwork(nn.Module):
             self.context_proj = None
 
         # We'll use a fixed number of attention heads.
-        self.n_head = 4  # You can adjust this as needed.
-
+        self.n_head = 4 
+        
         # Learned CLS token used as the query for variable selection.
         # Shape: [1, 1, hidden_size] — later expanded to match the batch (and time) dimensions.
         self.cls_token = nn.Parameter(torch.randn(1, 1, hidden_size))
@@ -372,7 +566,7 @@ class TransformerVariableSelectionNetwork(nn.Module):
         # attn_weights shape: [B*T, 1, 1+n_vars]. Discard the first column (self-attention of CLS).
         variable_selection_weights = attn_weights[:, :, 1:]  # [B*T, 1, n_vars]
 
-        # Optionally, pass the output through a feed-forward network and add a residual connection.
+        # pass the output through a feed-forward network and add a residual connection.
         ff = self.feed_forward(attn_output)
         output = self.layer_norm(attn_output + ff)  # [B*T, 1, H]
 
@@ -386,3 +580,4 @@ class TransformerVariableSelectionNetwork(nn.Module):
             variable_selection_weights = variable_selection_weights.squeeze(1)
 
         return output, variable_selection_weights
+

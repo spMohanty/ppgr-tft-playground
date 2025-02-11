@@ -34,14 +34,16 @@ class Config:
     # Model hyperparameters
     
     hidden_size: int = 256
-    lstm_layers: int = 1
     dropout: float = 0.15
     num_quantiles: int = 7 # 7 or 13 or any odd number > 3
     attention_head_size: int = 4
-    hidden_continuous_size: int = 128
+    hidden_continuous_size: int = 32
     
     share_single_variable_networks: bool = True
     use_transformer_variable_selection_networks: bool = True
+    
+    use_lstm_encoder_decoder_layers: bool = False # Disabling LSTM based encoder-decoder layers by default
+    lstm_layers: int = 1
     
     use_transformer_encoder_decoder_layers: bool = True
     transformer_encoder_decoder_num_heads: int = 4
