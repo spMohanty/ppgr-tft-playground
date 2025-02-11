@@ -40,11 +40,7 @@ class Config:
     hidden_continuous_size: int = 32
     
     share_single_variable_networks: bool = True
-    
-    use_lstm_encoder_decoder_layers: bool = False # Disabling LSTM based encoder-decoder layers by default
-    lstm_layers: int = 1
-    
-    use_transformer_encoder_decoder_layers: bool = True
+        
     transformer_encoder_decoder_num_heads: int = 4
     transformer_encoder_decoder_num_layers: int = 4
     transformer_encoder_decoder_hidden_size: int = 32

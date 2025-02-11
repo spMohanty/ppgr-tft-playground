@@ -152,10 +152,9 @@ def main(**kwargs):
         
         # Model hyperparameters
         hidden_size=config.hidden_size,
-        lstm_layers=config.lstm_layers,
+        hidden_continuous_size=config.hidden_continuous_size,
         attention_head_size=config.attention_head_size,
         dropout=config.dropout,
-        hidden_continuous_size=config.hidden_continuous_size,
         output_size=config.num_quantiles,
         
         # Loss function

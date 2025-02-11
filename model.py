@@ -60,7 +60,7 @@ from sub_modules import (
     PreNormResidualBlock
 )
 
-from sub_modules import GatedLinearUnit, AddNorm
+from sub_modules import GatedLinearUnit, AddNorm, GateAddNorm
 
 
 from utils import conditional_enforce_quantile_monotonicity
@@ -97,12 +97,10 @@ class PPGRTemporalFusionTransformer(TemporalFusionTransformer):
         logger.info("Setting up variable selection networks")
         self.setup_variable_selection_networks()
         
-        if self.hparams.use_transformer_encoder_decoder_layers:
-            logger.info("Setting up transformer encoder decoder layers")
-            self.setup_transformer_encoder_decoder_layers()
-        
-        if not self.hparams.use_lstm_encoder_decoder_layers:
-            self.clean_up_lstm_encoder_decoder_layers()
+        logger.info("Setting up transformer encoder decoder layers")
+        self.setup_transformer_encoder_decoder_layers()
+    
+        self.clean_up_lstm_encoder_decoder_layers()
         
         self.setup_static_context_encoders()
     
@@ -142,6 +140,13 @@ class PPGRTemporalFusionTransformer(TemporalFusionTransformer):
             dropout=self.hparams.dropout,
             context_dim=None,
         )
+        
+
+        # output processing -> no dropout at this late stage
+        self.pre_output_gate_norm = GateAddNorm(
+            self.hparams.hidden_size, dropout=0.0, trainable_add=False
+        )
+        
             
     
     def configure_optimizers(self):
@@ -190,7 +195,7 @@ class PPGRTemporalFusionTransformer(TemporalFusionTransformer):
         torch.cuda.empty_cache() # called only once at the beginning, so not that big of a deal
         
     def setup_transformer_encoder_decoder_layers(self):
-        # Instead, create transformer layers:
+        # Encoder Layer
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=self.hparams.hidden_size,
             nhead=self.hparams.transformer_encoder_decoder_num_heads,
@@ -203,6 +208,7 @@ class PPGRTemporalFusionTransformer(TemporalFusionTransformer):
             num_layers=self.hparams.transformer_encoder_decoder_num_layers,
         )
 
+        # Decoder Layer
         decoder_layer = nn.TransformerDecoderLayer(
             d_model=self.hparams.hidden_size,
             nhead=self.hparams.transformer_encoder_decoder_num_heads,
@@ -225,12 +231,6 @@ class PPGRTemporalFusionTransformer(TemporalFusionTransformer):
         )
         self.post_transformer_add_norm_decoder = self.post_transformer_add_norm_encoder
         
-        if self.hparams.use_lstm_encoder_decoder_layers:
-            # Only create the projection layer if we are using LSTM encoder/decoder layers
-            self.transformer_lstm_projection_layer = GatedTransformerLSTMProjectionUnit(
-                hidden_size=self.hparams.hidden_size,
-                dropout=self.hparams.dropout
-            )
 
     def setup_variable_selection_networks(self):
         # variable selection
@@ -406,119 +406,64 @@ class PPGRTemporalFusionTransformer(TemporalFusionTransformer):
         )
 
         
-        if self.hparams.use_transformer_encoder_decoder_layers:
-            # --------------------------------------------------------------------
-            # Process inputs with Transformer
-            # --------------------------------------------------------------------
-            # We have "embeddings_varying_encoder" for the historical part (B x T_enc x hidden)
-            # and "embeddings_varying_decoder" for the future part (B x T_dec x hidden).
+        # --------------------------------------------------------------------
+        # Process inputs with Transformer
+        # --------------------------------------------------------------------
+        # We have "embeddings_varying_encoder" for the historical part (B x T_enc x hidden)
+        # and "embeddings_varying_decoder" for the future part (B x T_dec x hidden).
 
-            # Construct padding masks for the transformer (True = ignore)
-            # We want shape: (B, T_enc) and (B, T_dec)
-            encoder_padding_mask = create_mask(
-                max_encoder_length, encoder_lengths
-            )  # True where "padding"
-            decoder_padding_mask = create_mask(
-                embeddings_varying_decoder.shape[1], decoder_lengths
-            )
+        # Construct padding masks for the transformer (True = ignore)
+        # We want shape: (B, T_enc) and (B, T_dec)
+        encoder_padding_mask = create_mask(
+            max_encoder_length, encoder_lengths
+        )  # True where "padding"
+        decoder_padding_mask = create_mask(
+            embeddings_varying_decoder.shape[1], decoder_lengths
+        )
 
-            # create a causal mask for the decoder:
-            # Typically, the nn.TransformerDecoder by default uses a causal mask
-            # if you pass `tgt_mask`, but you might prefer to let the model attend to
-            # all known future steps (the original TFT's "causal_attention" param).
-            # For simplicity, let's do standard causal masking:
-            T_dec = embeddings_varying_decoder.shape[1]
-            causal_mask = nn.Transformer().generate_square_subsequent_mask(T_dec).to(
-                embeddings_varying_decoder.device
-            )
+        # create a causal mask for the decoder:
+        # Typically, the nn.TransformerDecoder by default uses a causal mask
+        # if you pass `tgt_mask`, but you might prefer to let the model attend to
+        # all known future steps (the original TFT's "causal_attention" param).
+        # For simplicity, let's do standard causal masking:
+        T_dec = embeddings_varying_decoder.shape[1]
+        causal_mask = nn.Transformer().generate_square_subsequent_mask(T_dec).to(
+            embeddings_varying_decoder.device
+        )
 
-            # Pass through the encoder
-            transformer_encoder_output = self.transformer_encoder(
-                src=embeddings_varying_encoder,  # B x T_enc x hidden
-                src_key_padding_mask=encoder_padding_mask,  # B x T_enc
-            )  # -> B x T_enc x hidden
+        # Pass through the encoder
+        transformer_encoder_output = self.transformer_encoder(
+            src=embeddings_varying_encoder,  # B x T_enc x hidden
+            src_key_padding_mask=encoder_padding_mask,  # B x T_enc
+        )  # -> B x T_enc x hidden
 
-            # Pass through the decoder
-            transformer_decoder_output = self.transformer_decoder(
-                tgt=embeddings_varying_decoder,        # B x T_dec x hidden
-                memory=transformer_encoder_output,                 # B x T_enc x hidden
-                tgt_mask=causal_mask,                  # T_dec x T_dec, standard
-                tgt_key_padding_mask=decoder_padding_mask,  # B x T_dec
-                memory_key_padding_mask=encoder_padding_mask,  # B x T_enc
-            )  # -> B x T_dec x hidden
-
-
-            # Add post transformer gating
-            transformer_output_encoder = self.post_transformer_gate_encoder(transformer_encoder_output)
-            transformer_output_encoder = self.post_transformer_add_norm_encoder(
-                transformer_output_encoder, embeddings_varying_encoder
-            )
-
-            transformer_output_decoder = self.post_transformer_gate_decoder(transformer_decoder_output)
-            transformer_output_decoder = self.post_transformer_add_norm_decoder(
-                transformer_output_decoder, embeddings_varying_decoder
-            )
-
-            transformer_output = torch.cat([transformer_output_encoder, transformer_output_decoder], dim=1)
+        # Pass through the decoder
+        transformer_decoder_output = self.transformer_decoder(
+            tgt=embeddings_varying_decoder,        # B x T_dec x hidden
+            memory=transformer_encoder_output,                 # B x T_enc x hidden
+            tgt_mask=causal_mask,                  # T_dec x T_dec, standard
+            tgt_key_padding_mask=decoder_padding_mask,  # B x T_dec
+            memory_key_padding_mask=encoder_padding_mask,  # B x T_enc
+        )  # -> B x T_dec x hidden
 
 
-        if self.hparams.use_lstm_encoder_decoder_layers:
-            # --------------------------------------------------------------------
-            # Process with the LSTM layer as well
-            # --------------------------------------------------------------------        
-            # calculate initial state
-            input_hidden = self.static_context_initial_hidden_lstm(static_embedding).expand(
-                self.hparams.lstm_layers, -1, -1
-            )
-            input_cell = self.static_context_initial_cell_lstm(static_embedding).expand(
-                self.hparams.lstm_layers, -1, -1
-            )
+        # Add post transformer gating
+        transformer_output_encoder = self.post_transformer_gate_encoder(transformer_encoder_output)
+        transformer_output_encoder = self.post_transformer_add_norm_encoder(
+            transformer_output_encoder, embeddings_varying_encoder
+        )
 
+        transformer_output_decoder = self.post_transformer_gate_decoder(transformer_decoder_output)
+        transformer_output_decoder = self.post_transformer_add_norm_decoder(
+            transformer_output_decoder, embeddings_varying_decoder
+        )
 
-            # run local encoder
-            lstm_encoder_output, (hidden, cell) = self.lstm_encoder(
-                embeddings_varying_encoder,
-                (input_hidden, input_cell),
-                lengths=encoder_lengths,
-                enforce_sorted=False,
-            )
+        transformer_output = torch.cat([transformer_output_encoder, transformer_output_decoder], dim=1)
 
-            # run local decoder
-            lstm_decoder_output, _ = self.lstm_decoder(
-                embeddings_varying_decoder,
-                (hidden, cell),
-                lengths=decoder_lengths,
-                enforce_sorted=False,
-            )
-        
-        
-            lstm_output_encoder = self.post_lstm_gate_encoder(lstm_encoder_output)
-            lstm_output_encoder = self.post_lstm_add_norm_encoder(
-                lstm_output_encoder, embeddings_varying_encoder
-            )
-
-            lstm_output_decoder = self.post_lstm_gate_decoder(lstm_decoder_output)
-            lstm_output_decoder = self.post_lstm_add_norm_decoder(
-                lstm_output_decoder, embeddings_varying_decoder
-            )
-
-            # Combine last encoder and decoder outputs
-            lstm_output = torch.cat([lstm_output_encoder, lstm_output_decoder], dim=1)
-
-
-        if self.hparams.use_transformer_encoder_decoder_layers and self.hparams.use_lstm_encoder_decoder_layers:
-            # Merge transformer and LSTM outputs
-            fused_encoder_decoder_output = self.transformer_lstm_projection_layer(torch.cat([transformer_output, lstm_output], dim=-1))
-        elif self.hparams.use_lstm_encoder_decoder_layers and not self.hparams.use_transformer_encoder_decoder_layers:
-            # When: LSTM is used but not transformer based encoder-decoder: Use the LSTM outputs as is
-            fused_encoder_decoder_output = lstm_output
-        else:
-            # When: Transformer is used but not LSTM based encoder-decoder: Use the transformer outputs as is
-            fused_encoder_decoder_output = transformer_output
                 
         # static enrichment
         static_context_enrichment = self.static_context_enrichment(static_embedding)
-        attn_input = self.static_enrichment(fused_encoder_decoder_output,
+        attn_input = self.static_enrichment(transformer_output,
                                             self.expand_static_context(
                                                 static_context_enrichment, 
                                                 timesteps))
@@ -538,7 +483,7 @@ class PPGRTemporalFusionTransformer(TemporalFusionTransformer):
         )
         output = self.pos_wise_ff(attn_output)
         output = self.pre_output_gate_norm(
-            output, fused_encoder_decoder_output[:, max_encoder_length:]
+            output, transformer_output[:, max_encoder_length:]
         )
         
         # Ensure the final output layer always runs in full precision
