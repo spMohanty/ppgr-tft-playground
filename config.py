@@ -28,8 +28,8 @@ class Config:
     no_data_cache: bool = False
 
     # DataLoader parameters
-    batch_size: int = 1024
-    num_workers: int = 8
+    batch_size: int = 1024 * 3
+    num_workers: int = 16
 
     # Model hyperparameters
     
@@ -40,7 +40,6 @@ class Config:
     hidden_continuous_size: int = 32
     
     share_single_variable_networks: bool = True
-    use_transformer_variable_selection_networks: bool = True
     
     use_lstm_encoder_decoder_layers: bool = False # Disabling LSTM based encoder-decoder layers by default
     lstm_layers: int = 1
@@ -91,7 +90,7 @@ class Config:
     checkpoint_top_k: int = 5
 
     # Performance parameters
-    disable_all_plots: bool = False
+    disable_all_plots: bool = True
     profiler:bool = False
 
 

@@ -57,13 +57,10 @@ from sub_modules import (
     SharedTransformerDecoder,
     GatedTransformerLSTMProjectionUnit,
     TransformerVariableSelectionNetwork,
-    PatchedVariableSelectionNetwork,
     PreNormResidualBlock
 )
 
 from sub_modules import GatedLinearUnit, AddNorm
-
-# from pytorch_forecasting.models.temporal_fusion_transformer.sub_modules import GatedResidualNetwork, GatedLinearUnit, AddNorm
 
 
 from utils import conditional_enforce_quantile_monotonicity
@@ -250,15 +247,8 @@ class PPGRTemporalFusionTransformer(TemporalFusionTransformer):
                 for name in self.hparams.static_reals
             }
         )
-        
-        if self.hparams.use_transformer_variable_selection_networks:
-            logger.info("Using TransformerVariableSelectionNetwork")
-            VariableSelectionNetwork = TransformerVariableSelectionNetwork
-        else:
-            logger.info("Using PatchedVariableSelectionNetwork")
-            VariableSelectionNetwork = PatchedVariableSelectionNetwork
-        
-        self.static_variable_selection = VariableSelectionNetwork(
+                
+        self.static_variable_selection = TransformerVariableSelectionNetwork(
             input_sizes=static_input_sizes,
             hidden_size=self.hparams.hidden_size,
             input_embedding_flags={
@@ -298,21 +288,6 @@ class PPGRTemporalFusionTransformer(TemporalFusionTransformer):
         # create single variable grns that are shared across decoder and encoder
         if self.hparams.share_single_variable_networks:
             self.shared_single_variable_grns = nn.ModuleDict()
-            # for name, input_size in encoder_input_sizes.items():
-            #     self.shared_single_variable_grns[name] = GatedResidualNetwork(
-            #         input_size,
-            #         min(input_size, self.hparams.hidden_size),
-            #         self.hparams.hidden_size,
-            #         self.hparams.dropout,
-            #     )
-            # for name, input_size in decoder_input_sizes.items():
-            #     if name not in self.shared_single_variable_grns:
-            #         self.shared_single_variable_grns[name] = GatedResidualNetwork(
-            #             input_size,
-            #             min(input_size, self.hparams.hidden_size),
-            #             self.hparams.hidden_size,
-            #             self.hparams.dropout,
-            #         )
             for name, input_size in encoder_input_sizes.items():
                 self.shared_single_variable_grns[name] = PreNormResidualBlock(
                     input_dim=input_size,
@@ -330,7 +305,7 @@ class PPGRTemporalFusionTransformer(TemporalFusionTransformer):
                     )
 
 
-        self.encoder_variable_selection = VariableSelectionNetwork(
+        self.encoder_variable_selection = TransformerVariableSelectionNetwork(
             input_sizes=encoder_input_sizes,
             hidden_size=self.hparams.hidden_size,
             input_embedding_flags={
@@ -346,7 +321,7 @@ class PPGRTemporalFusionTransformer(TemporalFusionTransformer):
             ),
         )
 
-        self.decoder_variable_selection = VariableSelectionNetwork(
+        self.decoder_variable_selection = TransformerVariableSelectionNetwork(
             input_sizes=decoder_input_sizes,
             hidden_size=self.hparams.hidden_size,
             input_embedding_flags={
