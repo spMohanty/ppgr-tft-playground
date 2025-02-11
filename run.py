@@ -80,7 +80,7 @@ def build_trainer(config: Config, callbacks: list, wandb_logger: WandbLogger) ->
     
     return pl.Trainer(
         profiler=profiler,
-        # precision="bf16",
+        precision=config.training_precision,
         max_epochs=config.max_epochs,
         accelerator="auto",
         enable_model_summary=True,
@@ -134,6 +134,18 @@ def main(**kwargs):
     else:
         logger.info("CUDA is not available. Using CPU.")
         
+    # Check if Flash Attention is available.
+    if torch.cuda.is_available():
+        if torch.backends.cuda.flash_sdp_enabled():
+            logger.success("Flash Attention available.")
+        else:
+            logger.error("Flash Attention not available.")
+            
+        if torch.backends.cuda.mem_efficient_sdp_enabled():
+            logger.success("Mem Efficient Attention available.")
+        else:
+            logger.error("Mem Efficient Attention not available.")
+                
     # Build the Temporal Fusion Transformer model using the training dataset.
     tft_model = PPGRTemporalFusionTransformer.from_dataset(
         train_loader.dataset,
@@ -145,17 +157,6 @@ def main(**kwargs):
         dropout=config.dropout,
         hidden_continuous_size=config.hidden_continuous_size,
         output_size=config.num_quantiles,
-        
-        share_single_variable_networks=config.share_single_variable_networks,
-        use_transformer_variable_selection_networks=config.use_transformer_variable_selection_networks,
-        
-        use_transformer_encoder_decoder_layers=config.use_transformer_encoder_decoder_layers,
-        transformer_encoder_decoder_num_heads=config.transformer_encoder_decoder_num_heads,
-        transformer_encoder_decoder_num_layers=config.transformer_encoder_decoder_num_layers,
-        transformer_encoder_decoder_hidden_size=config.transformer_encoder_decoder_hidden_size,
-        
-        
-        enforce_quantile_monotonicity=config.enforce_quantile_monotonicity,
         
         # Loss function
         loss=build_loss(config),        

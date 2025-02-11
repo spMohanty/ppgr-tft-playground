@@ -65,6 +65,9 @@ class Config:
     lr_scheduler_anneal_strategy: str = "cos"
     lr_scheduler_cycle_momentum: bool = False
     
+    # Precision parameters
+    training_precision: str = "bf16" # "bf16" or "fp32" (output_layer of the model still runs in fp32)
+    
     
     val_check_interval: float = 0.5
     trainer_log_every_n_steps: int = 1
