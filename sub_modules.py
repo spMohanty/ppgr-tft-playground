@@ -63,22 +63,6 @@ class AddNorm(nn.Module):
         output = self.norm(x + skip)
         return output
 
-# A helper module to “resample” a tensor (via a linear projection) and then normalize it.
-class ResampleNorm(nn.Module):
-    def __init__(self, in_features: int, out_features: int):
-        super().__init__()
-        self.linear = nn.Linear(in_features, out_features)
-        self.norm = nn.LayerNorm(out_features)
-        self.reset_parameters()
-
-    def reset_parameters(self):
-        nn.init.kaiming_normal_(self.linear.weight, nonlinearity="leaky_relu")
-        if self.linear.bias is not None:
-            nn.init.zeros_(self.linear.bias)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.norm(self.linear(x))
-
 # The GateAddNorm module combines a GLU and an AddNorm.
 class GateAddNorm(nn.Module):
     def __init__(
@@ -212,6 +196,7 @@ class TransformerVariableSelectionNetwork(nn.Module):
         self,
         input_sizes: Dict[str, int],
         hidden_size: int,
+        n_heads: int,
         input_embedding_flags: Dict[str, bool] = None,
         dropout: float = 0.1,
         context_size: int = None,
@@ -234,6 +219,7 @@ class TransformerVariableSelectionNetwork(nn.Module):
         super().__init__()
         self.input_sizes = input_sizes
         self.hidden_size = hidden_size
+        self.n_heads = n_heads
         self.dropout = dropout
         self.context_size = context_size
         self.input_embedding_flags = input_embedding_flags if input_embedding_flags is not None else {}
@@ -256,9 +242,6 @@ class TransformerVariableSelectionNetwork(nn.Module):
             self.context_proj = nn.Linear(context_size, hidden_size)
         else:
             self.context_proj = None
-
-        # We'll use a fixed number of attention heads.
-        self.n_head = 4 
         
         # Learned CLS token used as the query for variable selection.
         # Shape: [1, 1, hidden_size] — later expanded to match the batch (and time) dimensions.
@@ -266,7 +249,7 @@ class TransformerVariableSelectionNetwork(nn.Module):
 
         # Multi-head attention layer.
         self.mha = nn.MultiheadAttention(
-            embed_dim=hidden_size, num_heads=self.n_head, dropout=dropout, batch_first=True
+            embed_dim=hidden_size, num_heads=self.n_heads, dropout=dropout, batch_first=True
         )
 
         # An optional feed-forward network and layer norm following the attention layer.

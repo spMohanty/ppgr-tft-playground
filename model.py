@@ -103,6 +103,8 @@ class PPGRTemporalFusionTransformer(TemporalFusionTransformer):
         self.clean_up_lstm_encoder_decoder_layers()
         
         self.setup_static_context_encoders()
+        
+        self.setup_output_layers()
     
     def setup_static_context_encoders(self):
         ## Static Encoders
@@ -124,7 +126,7 @@ class PPGRTemporalFusionTransformer(TemporalFusionTransformer):
             context_dim=None,
         )
         
-        # static enrichment and processing past LSTM
+        # static enrichment just before the multihead attn
         self.static_enrichment = PreNormResidualBlock(
             input_dim=self.hparams.hidden_size,
             hidden_dim=self.hparams.hidden_size,
@@ -132,7 +134,9 @@ class PPGRTemporalFusionTransformer(TemporalFusionTransformer):
             dropout=self.hparams.dropout,
             context_dim=self.hparams.hidden_size,
         )
-        
+    
+    def setup_output_layers(self):
+        # post multihead attn processing before the output processing
         self.pos_wise_ff = PreNormResidualBlock(
             input_dim=self.hparams.hidden_size,
             hidden_dim=self.hparams.hidden_size,
@@ -141,11 +145,21 @@ class PPGRTemporalFusionTransformer(TemporalFusionTransformer):
             context_dim=None,
         )
         
-
         # output processing -> no dropout at this late stage
         self.pre_output_gate_norm = GateAddNorm(
             self.hparams.hidden_size, dropout=0.0, trainable_add=False
         )
+        if self.n_targets > 1:  # if to run with multiple targets
+            self.output_layer = nn.ModuleList(
+                [
+                    nn.Linear(self.hparams.hidden_size, output_size)
+                    for output_size in self.hparams.output_size
+                ]
+            )
+        else:
+            self.output_layer = nn.Linear(
+                self.hparams.hidden_size, self.hparams.output_size
+            )
         
             
     
@@ -251,6 +265,7 @@ class PPGRTemporalFusionTransformer(TemporalFusionTransformer):
         self.static_variable_selection = TransformerVariableSelectionNetwork(
             input_sizes=static_input_sizes,
             hidden_size=self.hparams.hidden_size,
+            n_heads=self.hparams.variable_selection_network_n_heads,
             input_embedding_flags={
                 name: True for name in self.hparams.static_categoricals
             },
@@ -308,6 +323,7 @@ class PPGRTemporalFusionTransformer(TemporalFusionTransformer):
         self.encoder_variable_selection = TransformerVariableSelectionNetwork(
             input_sizes=encoder_input_sizes,
             hidden_size=self.hparams.hidden_size,
+            n_heads=self.hparams.variable_selection_network_n_heads,
             input_embedding_flags={
                 name: True for name in self.hparams.time_varying_categoricals_encoder
             },
@@ -324,6 +340,7 @@ class PPGRTemporalFusionTransformer(TemporalFusionTransformer):
         self.decoder_variable_selection = TransformerVariableSelectionNetwork(
             input_sizes=decoder_input_sizes,
             hidden_size=self.hparams.hidden_size,
+            n_heads=self.hparams.variable_selection_network_n_heads,
             input_embedding_flags={
                 name: True for name in self.hparams.time_varying_categoricals_decoder
             },
@@ -337,7 +354,6 @@ class PPGRTemporalFusionTransformer(TemporalFusionTransformer):
             ),
         )
         
-
     def forward(self, x: dict) -> dict:
         """
         Forward pass that swaps out LSTM for a transformer encoder-decoder.
@@ -347,7 +363,7 @@ class PPGRTemporalFusionTransformer(TemporalFusionTransformer):
         x_cat = torch.cat([x["encoder_cat"], x["decoder_cat"]], dim=1)
         x_cont = torch.cat([x["encoder_cont"], x["decoder_cont"]], dim=1)
         timesteps = x_cont.size(1)
-        max_encoder_length = int(encoder_lengths.max())
+        max_encoder_length = self.hparams.max_encoder_length
 
         # embeddings
         input_vectors = self.input_embeddings(x_cat)
@@ -392,6 +408,10 @@ class PPGRTemporalFusionTransformer(TemporalFusionTransformer):
                 static_context_variable_selection[:, :max_encoder_length],
             )
         )
+        if embeddings_varying_encoder.ndim == 2:
+            # If the time dimension got squeezed out, unsqueeze it.
+            embeddings_varying_encoder = embeddings_varying_encoder.unsqueeze(1)
+        
 
         # decoder variable selection
         embeddings_varying_decoder = {
@@ -404,6 +424,8 @@ class PPGRTemporalFusionTransformer(TemporalFusionTransformer):
                 static_context_variable_selection[:, max_encoder_length:],
             )
         )
+        if embeddings_varying_decoder.ndim == 2:
+            embeddings_varying_decoder = embeddings_varying_decoder.unsqueeze(1)
 
         
         # --------------------------------------------------------------------

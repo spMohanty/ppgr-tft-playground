@@ -25,7 +25,6 @@ from utils import create_click_options, setup_experiment_name, initialize_wandb,
 from utils import set_random_seeds
 
 
-
 def build_callbacks(config: Config) -> (list, PPGRMetricsCallback):
     """Construct and return all Lightning callbacks along with the test metrics callback."""
     early_stop_callback = EarlyStopping(
@@ -174,7 +173,7 @@ def main(**kwargs):
 
     # Build the trainer.
     trainer = build_trainer(config, callbacks, wandb_logger)
-
+    
     # Start training.
     trainer.fit(tft_model, train_dataloaders=train_loader, val_dataloaders=val_loader)
 

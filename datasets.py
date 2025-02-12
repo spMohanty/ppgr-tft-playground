@@ -29,6 +29,8 @@ from pytorch_forecasting import (
 from pytorch_forecasting.data import GroupNormalizer
 from pytorch_forecasting.metrics import QuantileLoss
 
+from pytorch_forecasting.data.encoders import NaNLabelEncoder
+
 import lightning.pytorch as pl
 from lightning.pytorch.callbacks import EarlyStopping, LearningRateMonitor, ModelCheckpoint
 from lightning.pytorch.loggers import WandbLogger
@@ -49,6 +51,10 @@ def get_cache_params(config: Any) -> dict:
         "max_prediction_length": config.max_prediction_length,
         "validation_percentage": config.validation_percentage,
         "test_percentage": config.test_percentage,
+        
+        "include_food_covariates": config.include_food_covariates,
+        "include_food_covariates_from_horizon": config.include_food_covariates_from_horizon,
+        "include_user_demographics_covariates": config.include_user_demographics_covariates,
     }
 
 
@@ -79,19 +85,31 @@ def load_dataframe(dataset_version: str, debug_mode: bool) -> pd.DataFrame:
     Load the processed CSV file into a DataFrame and sort by user, block, and time.
     """
     if debug_mode:
-        file_path = (
-            f"data/processed/{dataset_version}/debug/"
-            f"debug-fay-ppgr-processed-and-aggregated-{dataset_version}.csv"
-        )
+        PREFIX = "debug-"
+        SUBDIR = "debug/"
     else:
-        file_path = (
-            f"data/processed/{dataset_version}/"
-            f"fay-ppgr-processed-and-aggregated-{dataset_version}.csv"
-        )
-    df = pd.read_csv(file_path)
-    df = df.sort_values(by=["user_id", "timeseries_block_id", "read_at"])
-    logger.info(f"Loaded dataframe with {len(df)} rows from {file_path}")
-    return df
+        PREFIX = ""
+        SUBDIR = ""
+
+    ppgr_df_path = (
+        f"data/processed/{dataset_version}/{SUBDIR}"
+        f"{PREFIX}fay-ppgr-processed-and-aggregated-{dataset_version}.csv"
+    )
+    users_demographics_df_path = (
+        f"data/processed/{dataset_version}/{SUBDIR}"
+        f"{PREFIX}users-demographics-data-{dataset_version}.csv"
+    )
+    
+    ppgr_df = pd.read_csv(ppgr_df_path)
+    users_demographics_df = pd.read_csv(users_demographics_df_path)
+    
+    # set user_id as int in both dataframes
+    ppgr_df["user_id"] = ppgr_df["user_id"].astype(str)
+    users_demographics_df["user_id"] = users_demographics_df["user_id"].astype(str)
+    
+    ppgr_df = ppgr_df.sort_values(by=["user_id", "timeseries_block_id", "read_at"])
+    logger.info(f"Loaded dataframe with {len(ppgr_df)} rows from {ppgr_df_path}")
+    return ppgr_df, users_demographics_df
 
 
 def create_slice(
@@ -168,18 +186,57 @@ def prepare_time_series_slices(
 
 
 def create_time_series_dataset(
-    df: pd.DataFrame,
+    ppgr_dataset_df: pd.DataFrame,
+    users_demographics_df: pd.DataFrame,
     max_encoder_length: int,
     max_prediction_length: int,
     food_covariates: List[str],
     predict_mode: bool = False,
+    
+    include_food_covariates: bool = True,
+    include_food_covariates_from_horizon: bool = True,
+    include_user_demographics_covariates: bool = True,
+    
 ) -> TimeSeriesDataSet:
     """
     Create a TimeSeriesDataSet from a DataFrame for PyTorch Forecasting.
     """
-    df = df.reset_index(drop=True)
+    ppgr_dataset_df = ppgr_dataset_df.reset_index(drop=True)
+    
+    
+    time_varying_known_reals = ["time_idx", "loc_eaten_hour"]
+    time_varying_unknown_reals = ["val"]
+    
+    # Add food covariates to the appropriate location
+    if include_food_covariates_from_horizon:
+        time_varying_known_reals += food_covariates
+    else:
+        time_varying_unknown_reals += food_covariates
+        
+        
+    static_categoricals = ["user_id"]
+    static_reals = []
+    
+    if include_user_demographics_covariates:
+        static_categoricals += ["user__edu_degree", "user__income", "user__household_desc", "user__job_status", "user__smoking", "user__general_hunger_level", "user__morning_hunger_level", "user__mid_hunger_level", "user__evening_hunger_level", "user__health_state", "user__physical_activities_frequency"]
+        static_reals += ["age", "weight", "height", "bmi"]    
+        # TODO: Add hunger levels    
+     
+    # Join df and users_demographics_df on user_id
+    if users_demographics_df is not None:
+        user_demographics_slice_df = users_demographics_df[users_demographics_df["user_id"].isin(ppgr_dataset_df["user_id"])]
+        ppgr_dataset_df = ppgr_dataset_df.merge(user_demographics_slice_df, on="user_id", how="left")
+    
+    # Ensure all categorical column are str
+    for col in static_categoricals:
+        ppgr_dataset_df[col] = ppgr_dataset_df[col].astype(str)
+    
+    # For static reals, replace NaN values with the mean of the column
+    for col in static_reals:
+        ppgr_dataset_df[col] = ppgr_dataset_df[col].fillna(ppgr_dataset_df[col].mean())
+    
     dataset = TimeSeriesDataSet(
-        df,
+        ppgr_dataset_df,
         time_idx="time_idx",
         target="val",
         group_ids=["user_id", "time_series_cluster_id"],
@@ -187,21 +244,39 @@ def create_time_series_dataset(
         max_encoder_length=max_encoder_length,
         min_prediction_length=max_prediction_length,
         max_prediction_length=max_prediction_length,
-        static_categoricals=["user_id"],
+        static_categoricals=static_categoricals,
+        static_reals=static_reals,
         time_varying_known_categoricals=[
             "loc_eaten_dow",
             "loc_eaten_dow_type",
             "loc_eaten_season"
         ],
-        time_varying_known_reals=["time_idx", "loc_eaten_hour"] + food_covariates,
+        time_varying_known_reals=time_varying_known_reals,
         time_varying_unknown_categoricals=[],
-        time_varying_unknown_reals=["val"],
+        time_varying_unknown_reals=time_varying_unknown_reals,
         target_normalizer=GroupNormalizer(
             groups=["user_id"], transformation="softplus"
         ),
         add_relative_time_idx=True,
         add_target_scales=True,
         add_encoder_length=True,
+        categorical_encoders={ # TODO: Fix this
+            "age": NaNLabelEncoder(add_nan=True),
+            "weight": NaNLabelEncoder(add_nan=True),
+            "height": NaNLabelEncoder(add_nan=True),
+            "bmi": NaNLabelEncoder(add_nan=True),
+            "user__edu_degree": NaNLabelEncoder(add_nan=True),
+            "user__income": NaNLabelEncoder(add_nan=True),
+            "user__household_desc": NaNLabelEncoder(add_nan=True),
+            "user__job_status": NaNLabelEncoder(add_nan=True),
+            "user__smoking": NaNLabelEncoder(add_nan=True),
+            "user__general_hunger_level": NaNLabelEncoder(add_nan=True),
+            "user__morning_hunger_level": NaNLabelEncoder(add_nan=True),
+            "user__mid_hunger_level": NaNLabelEncoder(add_nan=True),
+            "user__evening_hunger_level": NaNLabelEncoder(add_nan=True),
+            "user__health_state": NaNLabelEncoder(add_nan=True),
+            "user__physical_activities_frequency": NaNLabelEncoder(add_nan=True),
+        },
         predict_mode=predict_mode,
     )
     return dataset
@@ -230,8 +305,7 @@ def get_cached_time_series_datasets(
         test_dataset = torch.load(paths["test"], weights_only=False)
     else:
         logger.info(f"Cache not found for hash {cache_hash}. Preparing datasets...")
-        df = load_dataframe(config.dataset_version, config.debug_mode)
-        df["user_id"] = df["user_id"].astype(str)
+        df, users_demographics_df = load_dataframe(config.dataset_version, config.debug_mode)
         train_df, val_df, test_df = prepare_time_series_slices(
             df,
             config.max_encoder_length,
@@ -248,13 +322,37 @@ def get_cached_time_series_datasets(
         food_covariates = [col for col in train_df.columns if col.startswith("food__")]
         
         training_dataset = create_time_series_dataset(
-            train_df, config.max_encoder_length, config.max_prediction_length, food_covariates, predict_mode=False
+            train_df, 
+            users_demographics_df=users_demographics_df,            
+            max_encoder_length=config.max_encoder_length, 
+            max_prediction_length=config.max_prediction_length, 
+            food_covariates=food_covariates, 
+            predict_mode=False, 
+            include_food_covariates=config.include_food_covariates,
+            include_food_covariates_from_horizon=config.include_food_covariates_from_horizon,
+            include_user_demographics_covariates=config.include_user_demographics_covariates
         )
         validation_dataset = create_time_series_dataset(
-            val_df, config.max_encoder_length, config.max_prediction_length, food_covariates, predict_mode=False
+            val_df, 
+            users_demographics_df=users_demographics_df,            
+            max_encoder_length=config.max_encoder_length, 
+            max_prediction_length=config.max_prediction_length,
+            food_covariates=food_covariates,
+            predict_mode=False,
+            include_food_covariates=config.include_food_covariates,            
+            include_food_covariates_from_horizon=config.include_food_covariates_from_horizon,
+            include_user_demographics_covariates=config.include_user_demographics_covariates,
         )
         test_dataset = create_time_series_dataset(
-            test_df, config.max_encoder_length, config.max_prediction_length, food_covariates, predict_mode=True
+            test_df, 
+            users_demographics_df=users_demographics_df,            
+            max_encoder_length=config.max_encoder_length,
+            max_prediction_length=config.max_prediction_length,
+            food_covariates=food_covariates,
+            predict_mode=True,
+            include_food_covariates=config.include_food_covariates,            
+            include_food_covariates_from_horizon=config.include_food_covariates_from_horizon,
+            include_user_demographics_covariates=config.include_user_demographics_covariates,
         )
         
         torch.save(training_dataset, paths["train"])

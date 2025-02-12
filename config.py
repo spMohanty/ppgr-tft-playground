@@ -9,7 +9,7 @@ class Config:
     # General configuration
     experiment_name: str = "tft-ppgr-2025-fo"
     random_seed: int = 42
-    dataset_version: str = "v0.3"
+    dataset_version: str = "v0.4"
     debug_mode: bool = False
 
     # WandB configuration
@@ -21,15 +21,20 @@ class Config:
 
     # Data slicing parameters
     max_encoder_length: int = 8 * 4  # encoder window length (e.g., 32)
-    max_prediction_length: int = 2 * 4  # prediction horizon (e.g., 8)
+    max_prediction_length: int = 3 * 4  # prediction horizon (e.g., 8)
     validation_percentage: float = 0.1
     test_percentage: float = 0.1
     dataset_cache_dir: str = "/scratch/mohanty/food/ppgr/datasets-cache"
     no_data_cache: bool = False
+    
+    include_food_covariates: bool = True
+    include_food_covariates_from_horizon: bool = False # If True, the food related covariates are "time varying known reals", else they are "time varying unknown reals"
+    
+    include_user_demographics_covariates: bool = True
 
     # DataLoader parameters
-    batch_size: int = 1024 * 3
-    num_workers: int = 16
+    batch_size: int = 1024
+    num_workers: int = 8
 
     # Model hyperparameters
     
@@ -37,9 +42,11 @@ class Config:
     dropout: float = 0.15
     num_quantiles: int = 7 # 7 or 13 or any odd number > 3
     attention_head_size: int = 4
-    hidden_continuous_size: int = 32
+    hidden_continuous_size: int = 128
     
     share_single_variable_networks: bool = True
+    
+    variable_selection_network_n_heads: int = 4
         
     transformer_encoder_decoder_num_heads: int = 4
     transformer_encoder_decoder_num_layers: int = 4
@@ -69,7 +76,7 @@ class Config:
     val_check_interval: float = 0.5
     trainer_log_every_n_steps: int = 1
     
-    loss: str = "QuantileLoss" # "QuantileLoss" or "ApproximateCRPS" or "RMSE"
+    loss: str = "ApproximateCRPS" # "QuantileLoss" or "ApproximateCRPS" or "RMSE"
 
     # Early stopping parameters
     early_stop_enabled: bool = False
@@ -86,7 +93,7 @@ class Config:
     checkpoint_top_k: int = 5
 
     # Performance parameters
-    disable_all_plots: bool = True
+    disable_all_plots: bool = False
     profiler:bool = False
 
 
