@@ -21,19 +21,25 @@ class Config:
 
     # Data slicing parameters
     max_encoder_length: int = 8 * 4  # encoder window length (e.g., 32)
-    max_prediction_length: int = 3 * 4  # prediction horizon (e.g., 8)
+    max_prediction_length: int = 12 * 4  # prediction horizon (e.g., 8)
+    evaluation_horizon_length: int = 2 * 4 # evaluation horizon length (e.g., 2)
+
+    
     validation_percentage: float = 0.1
     test_percentage: float = 0.1
     dataset_cache_dir: str = "/scratch/mohanty/food/ppgr/datasets-cache"
     no_data_cache: bool = False
     
+    # Food Covariates    
     include_food_covariates: bool = True
-    include_food_covariates_from_horizon: bool = False # If True, the food related covariates are "time varying known reals", else they are "time varying unknown reals"
+    include_food_covariates_from_horizon: bool = True # If True, the food related covariates are "time varying known reals", else they are "time varying unknown reals"
     
+    # User Demographics Covariates
     include_user_demographics_covariates: bool = True
 
+
     # DataLoader parameters
-    batch_size: int = 1024
+    batch_size: int = 512
     num_workers: int = 8
 
     # Model hyperparameters
@@ -58,6 +64,7 @@ class Config:
     max_epochs: int = 30  # Early stopping will likely kick in before this.
     gradient_clip_val: float = 0.1
     
+    loss: str = "ApproximateCRPS" # "QuantileLoss" or "ApproximateCRPS" or "RMSE"    
     optimizer: str = "adamw" # cannot change this atm 
     optimizer_weight_decay: float = 0.05
 
@@ -72,11 +79,9 @@ class Config:
     # Precision parameters
     training_precision: str = "bf16" # "bf16" or "fp32" (output_layer of the model still runs in fp32)
     
-    
     val_check_interval: float = 0.5
     trainer_log_every_n_steps: int = 1
-    
-    loss: str = "ApproximateCRPS" # "QuantileLoss" or "ApproximateCRPS" or "RMSE"
+    number_of_plots_in_metrics_callback: int = 6
 
     # Early stopping parameters
     early_stop_enabled: bool = False

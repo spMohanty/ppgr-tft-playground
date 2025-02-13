@@ -41,8 +41,16 @@ def build_callbacks(config: Config) -> (list, PPGRMetricsCallback):
         log_momentum=True,
         log_weight_decay=True
         )
-    ppgr_metrics_val_callback = PPGRMetricsCallback(mode="val", disable_all_plots=config.disable_all_plots)
-    ppgr_metrics_test_callback = PPGRMetricsCallback(mode="test", disable_all_plots=config.disable_all_plots)
+    ppgr_metrics_val_callback = PPGRMetricsCallback(mode="val", 
+                                                    max_prediction_length=config.max_prediction_length,
+                                                    evaluation_horizon_length=config.evaluation_horizon_length,
+                                                    num_plots=config.number_of_plots_in_metrics_callback,
+                                                    disable_all_plots=config.disable_all_plots)
+    ppgr_metrics_test_callback = PPGRMetricsCallback(mode="test", 
+                                                     max_prediction_length=config.max_prediction_length,
+                                                     evaluation_horizon_length=config.evaluation_horizon_length,
+                                                     num_plots=config.number_of_plots_in_metrics_callback,
+                                                     disable_all_plots=config.disable_all_plots)
 
     callbacks = [
         rich_model_summary,

@@ -90,7 +90,8 @@ def compute_metric_correlations(metrics: Dict[str, Dict[str, torch.Tensor]],
 # PPGR Metrics Callback
 # -----------------------------------------------------------------------------
 class PPGRMetricsCallback(pl.Callback):
-    def __init__(self, mode: str = "val", num_plots: int = 6, disable_all_plots: bool = False):
+    def __init__(self, mode: str = "val", max_prediction_length: int = 12 * 4, evaluation_horizon_length: int = 2 * 4, 
+                 num_plots: int = 6, disable_all_plots: bool = False):
         """
         Custom Lightning callback to compute, log, and plot PPGR metrics.
         
@@ -101,8 +102,14 @@ class PPGRMetricsCallback(pl.Callback):
         """
         super().__init__()
         self.mode = mode
+        self.max_prediction_length = max_prediction_length
+        self.evaluation_horizon_length = evaluation_horizon_length
+        
         self.num_plots = num_plots
         self.disable_all_plots = disable_all_plots
+        
+        
+        
         self.correlation_calc_function = PearsonCorrCoef()
         self.final_metrics = {}
         self.plot_indices = None  # Random indices for plotting.
@@ -113,7 +120,7 @@ class PPGRMetricsCallback(pl.Callback):
         self.all_point_predictions = []
         self.all_quantile_predictions = []
         self.all_targets = []
-        self.all_encoder_values = []
+        self.all_encoder_targets = []
         self.raw_batch_data = []
         self.raw_prediction_outputs = []
 
@@ -129,7 +136,7 @@ class PPGRMetricsCallback(pl.Callback):
         self.all_point_predictions.append(point_forecast)
         self.all_quantile_predictions.append(predictions)
         self.all_targets.append(past_data["decoder_target"])
-        self.all_encoder_values.append(past_data["encoder_target"])
+        self.all_encoder_targets.append(past_data["encoder_target"])
         self.raw_batch_data.append(batch)
         self.raw_prediction_outputs.append(outputs)
 
@@ -284,23 +291,33 @@ class PPGRMetricsCallback(pl.Callback):
         }
     
 
-    def _compute_metrics(self, pl_module: Any = None, plot: bool = True, log: bool = True) -> Dict[str, torch.Tensor]:
+    def _compute_metrics(self, pl_module: Any = None, evaluation_horizon_length: int = 2 * 4, plot: bool = True, log: bool = True) -> Dict[str, torch.Tensor]:
+        # Use a consistent predict for all logs and plots
+        logger_prefix = f"{self.mode}_eh{evaluation_horizon_length}"
+
+        # Gather all predictions, targets, and encoder values needed to compute metrics
         all_preds = torch.cat(self.all_point_predictions, dim=0)
         all_quantile_preds = torch.cat(self.all_quantile_predictions, dim=0)
         all_targets = torch.cat(self.all_targets, dim=0)
-        all_encoder_values = torch.cat(self.all_encoder_values, dim=0)
+        all_encoder_targets = torch.cat(self.all_encoder_targets, dim=0)
         
-        iauc_metrics = compute_iauc_metrics(all_targets, all_preds, all_encoder_values)
-        auc_metrics = compute_auc_metrics(all_targets, all_preds, all_encoder_values)
+        # If evaluation horizon length is not the same as the max prediction length, we need to truncate the predictions and targets
+        if evaluation_horizon_length != self.max_prediction_length:
+            all_preds = all_preds[:, :evaluation_horizon_length]
+            all_quantile_preds = all_quantile_preds[:, :evaluation_horizon_length, :]
+            all_targets = all_targets[:, :evaluation_horizon_length]
+            all_encoder_targets = all_encoder_targets[:, :evaluation_horizon_length]
+        
+        iauc_metrics = compute_iauc_metrics(all_targets, all_preds, all_encoder_targets)
+        auc_metrics = compute_auc_metrics(all_targets, all_preds, all_encoder_targets)
         raw_cgm_metrics = {
             "predictions": {"raw_cgm": all_preds.flatten()},
             "ground_truth": {"raw_cgm": all_targets.flatten()}
         }
         
+        
         monotonicity_violation_metrics = self.compute_monotonicity_violation_metrics(all_quantile_preds)
-
-        prefix = f"{self.mode}_q-monotonicity_violation_"
-        metric_monotonicity_violations = { f"{prefix}{key}": value
+        metric_monotonicity_violations = { f"{logger_prefix}_q-monotonicity_violation_{key}": value
             for key, value in monotonicity_violation_metrics.items()
         }
         
@@ -320,9 +337,9 @@ class PPGRMetricsCallback(pl.Callback):
         auc_corr = compute_metric_correlations(auc_metrics, self.correlation_calc_function)
         cgm_corr = compute_metric_correlations(raw_cgm_metrics, self.correlation_calc_function)
 
-        prefix = f"{self.mode}_"
+
         metric_correlations = {
-            f"{prefix}{key}": value
+            f"{logger_prefix}_{key}": value
             for corr_dict in [iauc_corr, auc_corr, cgm_corr]
             for key, value in corr_dict.items()
         }
@@ -334,7 +351,7 @@ class PPGRMetricsCallback(pl.Callback):
                 scatter_fig = self.plot_metric_scatter(metric_type, all_metrics_data, metric_correlations)
                 if scatter_fig:
                     self.trainer.logger.experiment.log({
-                        f"{self.mode}_{metric_type}_scatter": wandb.Image(scatter_fig)
+                        f"{logger_prefix}_{metric_type}_scatter": wandb.Image(scatter_fig)
                     })
                     plt.close(scatter_fig)
                     
@@ -359,7 +376,13 @@ class PPGRMetricsCallback(pl.Callback):
         Common logic to run at the end of an epoch (either validation or test).
         """
         self.trainer = trainer
-        self.final_metrics = self._compute_metrics(pl_module, plot=plot)
+        self.final_metrics = self._compute_metrics(pl_module, evaluation_horizon_length=self.max_prediction_length, plot=plot)
+        self.final_metrics_at_evaluation_horizon = None
+        
+        if self.evaluation_horizon_length != self.max_prediction_length:
+            # Call the compute metrics again with the expected evaluation horizon length
+            self.final_metrics_at_evaluation_horizon = self._compute_metrics(pl_module, evaluation_horizon_length=self.evaluation_horizon_length, plot=plot)
+        
         self.reset_metrics()
 
     def on_validation_epoch_end(self, trainer, pl_module):
