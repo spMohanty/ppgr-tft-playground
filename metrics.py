@@ -181,7 +181,7 @@ class PPGRMetricsCallback(pl.Callback):
             fig = pl_module.plot_prediction(past_data, prediction_outputs, idx)
             self.trainer.logger.experiment.log({f"predictions_sample_{idx}": wandb.Image(fig)})
 
-    def plot_metric_scatter(self, metric_type: str, metrics_data: dict, metric_correlations: dict, max_points: int = 10000):
+    def plot_metric_scatter(self, metric_type: str, metrics_data: dict, metric_correlations: dict, max_points: int = 10000, logger_prefix: str = ""):
         """
         Create scatter plots comparing predicted vs. actual values for a given metric type.
         """
@@ -235,7 +235,7 @@ class PPGRMetricsCallback(pl.Callback):
             axes[idx].set_ylabel(f'Predicted {title_prefix}')
             axes[idx].set_title(f'{metric} Scatter Plot\n(n={len(pred):,} points)')
 
-            metric_key = f"{self.mode}_{metric}_corr"
+            metric_key = f"{logger_prefix}_{metric}_corr"
             if metric_key in metric_correlations:
                 corr = metric_correlations[metric_key].item()
                 axes[idx].text(0.05, 0.95, f'r = {corr:.3f}',
@@ -348,7 +348,7 @@ class PPGRMetricsCallback(pl.Callback):
         if plot:
             # Create and log scatter plots for each metric type
             for metric_type in ['iauc', 'auc', 'cgm']:
-                scatter_fig = self.plot_metric_scatter(metric_type, all_metrics_data, metric_correlations)
+                scatter_fig = self.plot_metric_scatter(metric_type, all_metrics_data, metric_correlations, logger_prefix=logger_prefix)
                 if scatter_fig:
                     self.trainer.logger.experiment.log({
                         f"{logger_prefix}_{metric_type}_scatter": wandb.Image(scatter_fig)

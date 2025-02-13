@@ -84,6 +84,15 @@ class PPGRTemporalFusionTransformer(TemporalFusionTransformer):
             experiment_config (Config): configuration for the experiment (check config.py)
             **kwargs: same arguments as TemporalFusionTransformer
         """
+        # remove all experiment config parameters from kwargs
+        for key in asdict(experiment_config):
+            if key in kwargs:
+                del kwargs[key]
+        # todo: investigate how to deal with this in a neater way
+        # without this the model wont load from checkpoint
+        
+        breakpoint()
+        
         super().__init__(**kwargs)
         
         # Add all experiment config parameters to the model hyperparams        

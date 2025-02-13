@@ -2,7 +2,7 @@ from dataclasses import dataclass, asdict
 from rich import print as rprint
 from rich.pretty import pprint
 
-from typing import Tuple
+from typing import Tuple, Any
 
 @dataclass
 class Config:
@@ -39,7 +39,7 @@ class Config:
 
 
     # DataLoader parameters
-    batch_size: int = 512
+    batch_size: int = 512 * 2
     num_workers: int = 8
 
     # Model hyperparameters
@@ -96,6 +96,8 @@ class Config:
     checkpoint_monitor_metric_mode: str = "min"
     checkpoint_dir: str = "/scratch/mohanty/checkpoints/tft-ppgr-2025"
     checkpoint_top_k: int = 5
+    
+    resume_from_checkpoint: Any = None # path to the checkpoint to resume from
 
     # Performance parameters
     disable_all_plots: bool = False
