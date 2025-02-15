@@ -143,11 +143,11 @@ class PPGRMetricsCallback(pl.Callback):
     def _get_last_batch_output(self, pl_module) -> Tuple[Any, Any]:
         """Retrieve the last batch output based on the current mode."""
         if self.mode == "train":
-            return pl_module.training_batch_full_outputs[-1]
+            return pl_module.last_training_batch_output
         elif self.mode == "val":
-            return pl_module.validation_batch_full_outputs[-1]
+            return pl_module.last_validation_batch_output
         elif self.mode == "test":
-            return pl_module.test_batch_full_outputs[-1]
+            return pl_module.last_test_batch_output
         else:
             raise ValueError(f"Unsupported mode: {self.mode}")
 
@@ -183,72 +183,117 @@ class PPGRMetricsCallback(pl.Callback):
 
     def plot_metric_scatter(self, metric_type: str, metrics_data: dict, metric_correlations: dict, max_points: int = 10000, logger_prefix: str = ""):
         """
-        Create scatter plots comparing predicted vs. actual values for a given metric type.
+        Create scatter plots comparing predicted vs. actual values for a given metric type using seaborn's FacetGrid.
         """
-        import seaborn as sns  # Imported here to avoid a global dependency if plotting is disabled.
+        import seaborn as sns
+        import pandas as pd
 
         if self.disable_all_plots:
             return None
 
+        # Define metrics based on metric_type
         if metric_type == 'iauc':
             metrics_to_plot = [
                 "iauc_l2", "iauc_l3", "iauc_min_l2", "iauc_min_l3", "iauc_l1",
                 "clipped_iauc_l2", "clipped_iauc_l3", "clipped_iauc_min_l2", "clipped_iauc_min_l3", "clipped_iauc_l1"
             ]
-            n_rows, n_cols = 2, 5
-            figsize = (25, 10)
+            figsize = (25 * len(metrics_to_plot) // 2, 10 * 2)
             title_prefix = 'iAUC'
         elif metric_type == 'auc':
             metrics_to_plot = ["auc"]
-            n_rows, n_cols = 1, 1
             figsize = (6, 6)
             title_prefix = 'AUC'
         elif metric_type == 'cgm':
             metrics_to_plot = ["raw_cgm"]
-            n_rows, n_cols = 1, 1
             figsize = (6, 6)
             title_prefix = 'CGM'
         else:
             raise ValueError(f"Unknown metric type: {metric_type}")
 
-        fig, axes = plt.subplots(n_rows, n_cols, figsize=figsize)
-        if not isinstance(axes, np.ndarray):
-            axes = np.array([axes])
-        axes = axes.flatten()
-
+        # Create a DataFrame for all metrics
         metrics_subset = metrics_data.get(metric_type, {})
-        for idx, metric in enumerate(metrics_to_plot):
-            if idx >= len(axes):
-                break
-
+        plot_data = []
+        
+        for metric in metrics_to_plot:
             pred = metrics_subset["predictions"][metric].detach().cpu().to(torch.float32).numpy()
             true = metrics_subset["ground_truth"][metric].detach().cpu().to(torch.float32).numpy()
-
+            
             # Random subsample if too many points
             if len(pred) > max_points:
                 indices = np.random.choice(len(pred), max_points, replace=False)
                 pred = pred[indices]
                 true = true[indices]
-
-            sns.scatterplot(x=true, y=pred, s=0.75, alpha=0.5, ax=axes[idx])
-            axes[idx].set_xlabel(f'True {title_prefix}')
-            axes[idx].set_ylabel(f'Predicted {title_prefix}')
-            axes[idx].set_title(f'{metric} Scatter Plot\n(n={len(pred):,} points)')
-
+            
             metric_key = f"{logger_prefix}_{metric}_corr"
-            if metric_key in metric_correlations:
-                corr = metric_correlations[metric_key].item()
-                axes[idx].text(0.05, 0.95, f'r = {corr:.3f}',
-                               transform=axes[idx].transAxes,
-                               bbox=dict(facecolor='white', alpha=0.8))
+            corr = metric_correlations[metric_key].item() if metric_key in metric_correlations else None
+            
+            plot_data.extend([{
+                'True': t,
+                'Predicted': p,
+                'Metric': metric,
+                'Correlation': f'r = {corr:.3f}' if corr is not None else ''
+            } for t, p in zip(true, pred)])
 
-        # Remove any extra axes
-        for ax in axes[len(metrics_to_plot):]:
-            fig.delaxes(ax)
+        df = pd.DataFrame(plot_data)
+        
+        plt.figure(figsize=figsize)
+        # Create FacetGrid
+        n_cols = min(5, len(metrics_to_plot))
+        n_rows = (len(metrics_to_plot) + n_cols - 1) // n_cols
+        
+        g = sns.FacetGrid(df, col='Metric', col_wrap=n_cols, 
+                          height=4, aspect=1,
+                          sharex=False, sharey=False)
+        
+        # Add scatter plots
+        g.map_dataframe(sns.scatterplot, x='True', y='Predicted', 
+                        s=0.75, alpha=0.5)
+        
+        # Customize each subplot
+        for _idx, (ax, metric) in enumerate(zip(g.axes.flat, metrics_to_plot)):
+            metric_data = df[df['Metric'] == metric]
+            corr_text = metric_data['Correlation'].iloc[0]
+            
+            fontsize = 10
+            ax.text(0.05, 0.95, corr_text,
+                   transform=ax.transAxes, fontsize=fontsize)
+                        
+            ax.set_title(f'{logger_prefix}_{metric}', fontsize=fontsize)
+            ax.set_xlabel(f'True {title_prefix}', fontsize=fontsize)
+            ax.set_ylabel(f'Predicted {title_prefix}', fontsize=fontsize)
+            
+            # Calculate Row and Column of the subplot
+            row = _idx // n_cols
+            col = _idx % n_cols
+            
+            # Top Row Changes 
+            if row == 0 and col >= 1:
+                # remove x ticks and labels
+                ax.set_xticks([])   
+                ax.set_xlabel('')
+                # remove y ticks and labels
+                ax.set_yticks([])
+                ax.set_ylabel('')
+            
+            if row == 1 and col >= 1:
+                # remove y ticks and labels
+                ax.set_yticks([])
+                ax.set_ylabel('')
+                
+            if row == 0 and col == 0:
+                # remove x ticks and labels
+                ax.set_xticks([])
+                ax.set_xlabel('')
+                
+            if row == 1 and col == 0:
+                # do nothing 
+                pass          
+                # todo: move title to the bottom
+                
+                                
 
         plt.tight_layout()
-        plt.close(fig)
-        return fig
+        return g.fig
     
     def compute_monotonicity_violation_metrics(self, outputs: torch.Tensor):
         """

@@ -30,7 +30,7 @@ from loguru import logger
 
 from pytorch_forecasting import Baseline, TemporalFusionTransformer, TimeSeriesDataSet
 
-from typing import Any, Dict, Optional, Union
+from typing import Any, Dict, Optional, Union, List
 
 import torch
 from torch import nn
@@ -68,12 +68,43 @@ from utils import conditional_enforce_quantile_monotonicity
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import OneCycleLR
 
-from config import Config
+
 
 class PPGRTemporalFusionTransformer(TemporalFusionTransformer):
     def __init__(
         self,        
-        experiment_config: Config = None,
+        # Model architecture
+        hidden_size: int, # for the main model flow
+        hidden_continuous_size: int = 1, # for the main model flow
+        attention_head_size: int = 1, # interpretable attention head 
+
+        
+        output_size: Union[int, List[int]] = 7, # number of quantiles in this case
+        dropout: float = 0.1, 
+        
+        # Optimizer and learning rate scheduler settings
+        optimizer: str = "adamw",
+        lr_scheduler: str = "onecycle",
+        lr_scheduler_max_lr_multiplier: float = 1.0,
+        lr_scheduler_pct_start: float = 0.3,
+        lr_scheduler_anneal_strategy: str = "cosine",
+        lr_scheduler_cycle_momentum: bool = True,
+        learning_rate: float = 1e-3,
+        optimizer_weight_decay: float = 0.0,
+
+        # Variable Selection Networks
+        variable_selection_network_n_heads: int = 4,
+        share_single_variable_networks: bool = True,
+                
+        # Transformer encoder/decoder configuration
+        transformer_encoder_decoder_num_heads: int = 8,
+        transformer_encoder_decoder_hidden_size: int = 32,
+        transformer_encoder_decoder_num_layers: int = 1,        
+        
+        # Additional inputs and settings
+        max_encoder_length: int = 8 * 4, # 8 hours in 15 min steps
+        enforce_quantile_monotonicity: bool = False,        
+        
         **kwargs,
     ):
         """
@@ -83,25 +114,12 @@ class PPGRTemporalFusionTransformer(TemporalFusionTransformer):
         Args:
             experiment_config (Config): configuration for the experiment (check config.py)
             **kwargs: same arguments as TemporalFusionTransformer
-        """
-        # remove all experiment config parameters from kwargs
-        for key in asdict(experiment_config):
-            if key in kwargs:
-                del kwargs[key]
-        # todo: investigate how to deal with this in a neater way
-        # without this the model wont load from checkpoint
-        
-        breakpoint()
-        
-        super().__init__(**kwargs)
-        
-        # Add all experiment config parameters to the model hyperparams        
-        self.hparams.update(asdict(experiment_config))
-                
+        """        
         # Setup variables needed for the Metrics Callback
-        self.training_batch_full_outputs = []
-        self.validation_batch_full_outputs = []
-        self.test_batch_full_outputs = []
+        self.save_hyperparameters()
+
+        super().__init__(**kwargs)        
+        
         
         logger.info("Setting up variable selection networks")
         self.setup_variable_selection_networks()
@@ -109,10 +127,13 @@ class PPGRTemporalFusionTransformer(TemporalFusionTransformer):
         logger.info("Setting up transformer encoder decoder layers")
         self.setup_transformer_encoder_decoder_layers()
     
+        logger.info("Cleaning up LSTM encoder decoder layers")
         self.clean_up_lstm_encoder_decoder_layers()
         
+        logger.info("Setting up static context encoders")
         self.setup_static_context_encoders()
         
+        logger.info("Setting up output layers")
         self.setup_output_layers()
     
     def setup_static_context_encoders(self):
@@ -366,7 +387,7 @@ class PPGRTemporalFusionTransformer(TemporalFusionTransformer):
     def forward(self, x: dict) -> dict:
         """
         Forward pass that swaps out LSTM for a transformer encoder-decoder.
-        """
+        """        
         encoder_lengths = x["encoder_lengths"]
         decoder_lengths = x["decoder_lengths"]
         x_cat = torch.cat([x["encoder_cat"], x["decoder_cat"]], dim=1)
@@ -544,12 +565,11 @@ class PPGRTemporalFusionTransformer(TemporalFusionTransformer):
         """
         Training step: processes a training batch, updates logging, and stores outputs.
         """
-        self.training_batch_full_outputs = [] # only retain the data of the last batch
         x, y = batch
         log, out = self.step(x, y, batch_idx)
         log.update(self.create_log(x, y, out, batch_idx))
         self.training_step_outputs.append(log) # from the base_model.py 
-        self.training_batch_full_outputs.append((log, out))
+        self.last_training_batch_output = (log, out)
         
         # Access and log the current learning rate from the first optimizer's first param group
         current_lr = self.trainer.optimizers[0].param_groups[0]['lr']
@@ -562,12 +582,11 @@ class PPGRTemporalFusionTransformer(TemporalFusionTransformer):
         """
         Validation step: processes a validation batch, updates logging, and stores outputs.
         """
-        self.validation_batch_full_outputs = [] # only retain the data of the last batch
         x, y = batch
         log, out = self.step(x, y, batch_idx)
         log.update(self.create_log(x, y, out, batch_idx))
         self.validation_step_outputs.append(log)
-        self.validation_batch_full_outputs.append((log, out))
+        self.last_validation_batch_output = (log, out)
         return log
 
     def test_step(self, batch, batch_idx):
@@ -575,12 +594,11 @@ class PPGRTemporalFusionTransformer(TemporalFusionTransformer):
         Test step: processes a test batch, updates logging, and stores outputs.
         """
         # Clear previous test outputs.
-        self.test_batch_full_outputs = [] # only retain the data of the last batch
         x, y = batch
         log, out = self.step(x, y, batch_idx)
         log.update(self.create_log(x, y, out, batch_idx))
         self.testing_step_outputs.append(log)
-        self.test_batch_full_outputs.append((log, out))
+        self.last_test_batch_output = (log, out)
         return log
 
     def plot_prediction(

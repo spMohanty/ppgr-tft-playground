@@ -214,18 +214,12 @@ def create_time_series_dataset(
         time_varying_unknown_reals += food_covariates
         
         
-    static_categoricals = ["user_id"]
+    static_categoricals = [] # user_id used to be here, but removing it, to make the model more invariant to the user_id
     static_reals = []
     
     if include_user_demographics_covariates:
-        static_categoricals += ["user__edu_degree", "user__income", "user__household_desc", "user__job_status", "user__smoking", "user__general_hunger_level", "user__morning_hunger_level", "user__mid_hunger_level", "user__evening_hunger_level", "user__health_state", "user__physical_activities_frequency"]
-        static_reals += ["age", "weight", "height", "bmi"]    
-        # TODO: Add hunger levels    
-     
-    # Join df and users_demographics_df on user_id
-    if users_demographics_df is not None:
-        user_demographics_slice_df = users_demographics_df[users_demographics_df["user_id"].isin(ppgr_dataset_df["user_id"])]
-        ppgr_dataset_df = ppgr_dataset_df.merge(user_demographics_slice_df, on="user_id", how="left")
+        static_categoricals += ["user__edu_degree", "user__income", "user__household_desc", "user__job_status", "user__smoking", "user__health_state", "user__physical_activities_frequency"]
+        static_reals += ["user__age", "user__weight", "user__height", "user__bmi","user__general_hunger_level", "user__morning_hunger_level", "user__mid_hunger_level", "user__evening_hunger_level"]    # Note: the ppgr_dataset should already have these columns if the config is set correctly
     
     # Ensure all categorical column are str
     for col in static_categoricals:
@@ -261,10 +255,10 @@ def create_time_series_dataset(
         add_target_scales=True,
         add_encoder_length=True,
         categorical_encoders={ # TODO: Fix this
-            "age": NaNLabelEncoder(add_nan=True),
-            "weight": NaNLabelEncoder(add_nan=True),
-            "height": NaNLabelEncoder(add_nan=True),
-            "bmi": NaNLabelEncoder(add_nan=True),
+            "user__age": NaNLabelEncoder(add_nan=True),
+            "user__weight": NaNLabelEncoder(add_nan=True),
+            "user__height": NaNLabelEncoder(add_nan=True),
+            "user__bmi": NaNLabelEncoder(add_nan=True),
             "user__edu_degree": NaNLabelEncoder(add_nan=True),
             "user__income": NaNLabelEncoder(add_nan=True),
             "user__household_desc": NaNLabelEncoder(add_nan=True),
@@ -276,6 +270,9 @@ def create_time_series_dataset(
             "user__evening_hunger_level": NaNLabelEncoder(add_nan=True),
             "user__health_state": NaNLabelEncoder(add_nan=True),
             "user__physical_activities_frequency": NaNLabelEncoder(add_nan=True),
+            "loc_eaten_dow": NaNLabelEncoder(add_nan=True),
+            "loc_eaten_dow_type": NaNLabelEncoder(add_nan=True),
+            "loc_eaten_season": NaNLabelEncoder(add_nan=True),
         },
         predict_mode=predict_mode,
     )
@@ -285,6 +282,15 @@ def create_time_series_dataset(
 # =============================================================================
 # Cached Dataset and DataLoader Functions
 # =============================================================================
+def merge_ppgr_and_users_demographics(
+    ppgr_df: pd.DataFrame,
+    users_demographics_df: pd.DataFrame
+) -> pd.DataFrame:
+    """
+    Merge the PPGR and users demographics dataframes on user_id.
+    """
+    return ppgr_df.merge(users_demographics_df, on="user_id", how="left")
+
 def get_cached_time_series_datasets(
     config: Any
 ) -> Tuple[TimeSeriesDataSet, TimeSeriesDataSet, TimeSeriesDataSet]:
@@ -318,9 +324,15 @@ def get_cached_time_series_datasets(
             f"Val: {len(val_df)} rows, Test: {len(test_df)} rows"
         )
         
+        if config.include_user_demographics_covariates:
+            logger.info("Merging PPGR and users demographics dataframes...")
+            train_df = merge_ppgr_and_users_demographics(train_df, users_demographics_df)
+            val_df = merge_ppgr_and_users_demographics(val_df, users_demographics_df)
+            test_df = merge_ppgr_and_users_demographics(test_df, users_demographics_df)
+        
         # Determine food covariates (all columns beginning with "food__")
         food_covariates = [col for col in train_df.columns if col.startswith("food__")]
-        
+                
         training_dataset = create_time_series_dataset(
             train_df, 
             users_demographics_df=users_demographics_df,            
@@ -332,28 +344,40 @@ def get_cached_time_series_datasets(
             include_food_covariates_from_horizon=config.include_food_covariates_from_horizon,
             include_user_demographics_covariates=config.include_user_demographics_covariates
         )
+        
         validation_dataset = create_time_series_dataset(
             val_df, 
             users_demographics_df=users_demographics_df,            
             max_encoder_length=config.max_encoder_length, 
-            max_prediction_length=config.max_prediction_length,
+            max_prediction_length=config.max_prediction_length, 
             food_covariates=food_covariates,
             predict_mode=False,
-            include_food_covariates=config.include_food_covariates,            
+            include_food_covariates=config.include_food_covariates,
             include_food_covariates_from_horizon=config.include_food_covariates_from_horizon,
             include_user_demographics_covariates=config.include_user_demographics_covariates,
         )
+        
         test_dataset = create_time_series_dataset(
             test_df, 
             users_demographics_df=users_demographics_df,            
-            max_encoder_length=config.max_encoder_length,
-            max_prediction_length=config.max_prediction_length,
+            max_encoder_length=config.max_encoder_length, 
+            max_prediction_length=config.max_prediction_length, 
             food_covariates=food_covariates,
-            predict_mode=True,
-            include_food_covariates=config.include_food_covariates,            
+            predict_mode=False,
+            include_food_covariates=config.include_food_covariates,
             include_food_covariates_from_horizon=config.include_food_covariates_from_horizon,
             include_user_demographics_covariates=config.include_user_demographics_covariates,
         )
+        
+        # training_dataset_parameters = training_dataset.get_parameters()
+        
+        # validation_dataset = TimeSeriesDataSet.from_parameters(training_dataset_parameters, val_df, stop_randomization=True)
+        # test_dataset = TimeSeriesDataSet.from_parameters(training_dataset_parameters, test_df, stop_randomization=True)
+        
+        
+        # Copy over the parameters from the training dataset to the validation and test datasets
+        # validation_dataset = TimeSeriesDataSet.from_dataset(training_dataset, val_df, stop_randomization=True)
+        # test_dataset = TimeSeriesDataSet.from_dataset(training_dataset, test_df, stop_randomization=True)
         
         torch.save(training_dataset, paths["train"])
         torch.save(validation_dataset, paths["val"])

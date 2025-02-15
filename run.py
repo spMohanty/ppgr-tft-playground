@@ -161,16 +161,36 @@ def main(**kwargs):
         hidden_size=config.hidden_size,
         hidden_continuous_size=config.hidden_continuous_size,
         attention_head_size=config.attention_head_size,
+        
         dropout=config.dropout,
         output_size=config.num_quantiles,
         
+        # Optimizer and learning rate scheduler settings
+        optimizer = config.optimizer,
+        lr_scheduler = config.lr_scheduler,
+        lr_scheduler_max_lr_multiplier = config.lr_scheduler_max_lr_multiplier,
+        lr_scheduler_pct_start = config.lr_scheduler_pct_start,
+        lr_scheduler_anneal_strategy = config.lr_scheduler_anneal_strategy,
+        lr_scheduler_cycle_momentum = config.lr_scheduler_cycle_momentum,
+        learning_rate = config.learning_rate,
+        optimizer_weight_decay = config.optimizer_weight_decay,
+
+        # Variable Selection Networks
+        variable_selection_network_n_heads = config.variable_selection_network_n_heads,
+        share_single_variable_networks = config.share_single_variable_networks,
+                
+        # Transformer encoder/decoder configuration
+        transformer_encoder_decoder_num_heads = config.transformer_encoder_decoder_num_heads,
+        transformer_encoder_decoder_hidden_size = config.transformer_encoder_decoder_hidden_size,
+        transformer_encoder_decoder_num_layers = config.transformer_encoder_decoder_num_layers,        
+        
+        # Additional inputs and settings
+        max_encoder_length = config.max_encoder_length,
+        enforce_quantile_monotonicity = config.enforce_quantile_monotonicity,                
+        
         # Loss function
         loss=build_loss(config),        
-        
-        # Optimizer hyperparameters
-        experiment_config=config,
-
-        
+                
         # Logging
         #log_interval=config.trainer_log_interval,
     )

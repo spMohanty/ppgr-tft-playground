@@ -20,8 +20,8 @@ class Config:
     allow_negative_iauc_values: bool = True
 
     # Data slicing parameters
-    max_encoder_length: int = 8 * 4  # encoder window length (e.g., 32)
-    max_prediction_length: int = 12 * 4  # prediction horizon (e.g., 8)
+    max_encoder_length: int = 48 * 4  # encoder window length (e.g., 32)
+    max_prediction_length: int = 2 * 4  # prediction horizon (e.g., 8)
     evaluation_horizon_length: int = 2 * 4 # evaluation horizon length (e.g., 2)
 
     
@@ -39,7 +39,7 @@ class Config:
 
 
     # DataLoader parameters
-    batch_size: int = 512 * 2
+    batch_size: int = 256
     num_workers: int = 8
 
     # Model hyperparameters
@@ -50,7 +50,7 @@ class Config:
     attention_head_size: int = 4
     hidden_continuous_size: int = 128
     
-    share_single_variable_networks: bool = True
+    share_single_variable_networks: bool = False
     
     variable_selection_network_n_heads: int = 4
         
@@ -61,7 +61,7 @@ class Config:
     enforce_quantile_monotonicity: bool = False
 
     # Trainer parameters
-    max_epochs: int = 30  # Early stopping will likely kick in before this.
+    max_epochs: int = 30  # Early stopping can likely kick in before this, unless its disabled
     gradient_clip_val: float = 0.1
     
     loss: str = "ApproximateCRPS" # "QuantileLoss" or "ApproximateCRPS" or "RMSE"    
@@ -71,7 +71,7 @@ class Config:
     lr_scheduler: str = "onecycle" # cannot change this atm 
     
     learning_rate: float = 1e-4
-    lr_scheduler_max_lr_multiplier: float = 1.5 # make the lr 1.5 (multiplier) times in the first 5% of the steps, then slowly decrease until the end of all the epochs
+    lr_scheduler_max_lr_multiplier: float = 1.5 # make the lr 1.5 (multiplier) times in the first 10% (pct_start) of the steps, then slowly decrease until the end of all the epochs
     lr_scheduler_pct_start: float = 0.1 # should keep it around upto 2.5 epochs for max 30 epochs - kind of a warm up
     lr_scheduler_anneal_strategy: str = "cos"
     lr_scheduler_cycle_momentum: bool = False

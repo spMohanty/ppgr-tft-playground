@@ -191,3 +191,6 @@ slurm-*.out
 cache/
 
 animations/
+
+
+lightning_logs/
