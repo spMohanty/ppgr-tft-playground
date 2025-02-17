@@ -11,9 +11,9 @@
 # Configuration variables
 WANDB_ENTITY="mfr-ppgr-2025"
 WANDB_PROJECT="tft-ppgr-2025-ablation-v0"
-WANDB_SWEEP_ID="u6s3pker"
+WANDB_SWEEP_ID="iut4zz14"
 
-NUM_AGENTS=2 # 2 for h100 and 1 for l40s
+NUM_AGENTS=1 # 2 for h100 and 1 for l40s
 
 cd /home/mohanty/food/pytorch-forecasting-playground
 

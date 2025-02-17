@@ -20,7 +20,7 @@ class Config:
     allow_negative_iauc_values: bool = True
 
     # Data slicing parameters
-    max_encoder_length: int = 24 * 4  # encoder window length (e.g., 32)
+    max_encoder_length: int = 8 * 4  # encoder window length (e.g., 32)
     max_prediction_length: int = 8 * 4  # prediction horizon (e.g., 8)
     evaluation_horizon_length: int = 2 * 4 # evaluation horizon length (e.g., 2)
 
@@ -39,7 +39,7 @@ class Config:
     scale_target_by_user_id: bool = True
 
     # DataLoader parameters
-    batch_size: int = 1024
+    batch_size: int = 256
     num_workers: int = 8
 
     # Model hyperparameters
@@ -77,7 +77,7 @@ class Config:
     lr_scheduler_cycle_momentum: bool = False
     
     # Precision parameters
-    training_precision: str = "bf16" # "bf16" or "fp32" (output_layer of the model still runs in fp32)
+    training_precision: str = "fp32" # "bf16" or "fp32" (output_layer of the model still runs in fp32)
     
     val_check_interval: float = 0.5
     trainer_log_every_n_steps: int = 1
