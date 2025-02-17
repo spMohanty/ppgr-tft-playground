@@ -1,4 +1,4 @@
 #!/bin/bash
 
 
-wandb sweep --project tft-ppgr-2025 food-only-sweep.yaml
+wandb sweep --project tft-ppgr-2025-ablation-v0 ablation-v0.yaml

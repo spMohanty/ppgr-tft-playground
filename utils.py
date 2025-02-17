@@ -55,8 +55,9 @@ def create_click_options(config_class: Type[Any]) -> Callable:
 
             if field_type == bool:
                 # Use dual flag syntax: "--field/--no-field" so the default from the config is honored.
-                option_declaration = f"--{field.name.replace('_', '-')}/--no-{field.name.replace('_', '-')}"
-                option_names = [option_declaration]
+                hyphen_declaration = f"--{field.name.replace('_', '-')}/--no-{field.name.replace('_', '-')}"
+                underscore_declaration = f"--{field.name}/--no-{field.name}"
+                option_names = [hyphen_declaration, underscore_declaration]
                 
                 # For special cases, like "debug_mode", add an additional alias if needed.
                 if field.name == "debug_mode":
@@ -140,13 +141,13 @@ def setup_experiment_name(config: Config) -> str:
     """
     base_name = config.experiment_name
     experiment_name_parts = [
-        base_name,
-        f"hs{config.hidden_size}",
-        f"ahs{config.attention_head_size}",
-        f"hcs{config.hidden_continuous_size}",
-        f"d{int(config.dropout * 100)}",
-        f"lr{config.learning_rate:.0e}",
-        f"bs{config.batch_size}",
+        config.experiment_name,
+        f"enc{config.max_encoder_length}",
+        f"pred{config.max_prediction_length}",
+        f"eval{config.evaluation_horizon_length}",
+        f"food-{'T' if config.include_food_covariates else 'F'}",
+        f"food-horizon{'T' if config.include_food_covariates_from_horizon else 'F'}",
+        f"demo{'T' if config.include_user_demographics_covariates else 'F'}"
     ]
     experiment_name = "-".join(experiment_name_parts)
     logger.debug(f"Experiment name constructed: {experiment_name}")

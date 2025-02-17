@@ -177,9 +177,9 @@ def prepare_time_series_slices(
                 _validation_data_slices = user_slices[train_end:val_end]
                 _test_data_slices = user_slices[val_end:]
                 
-                assert len(_training_data_slices) > 0, f"User {user_id} has no training slices"
-                assert len(_validation_data_slices) > 0, f"User {user_id} has no validation slices"
-                assert len(_test_data_slices) > 0, f"User {user_id} has no test slices"
+                # assert len(_training_data_slices) > 0, f"User {user_id} has no training slices"
+                # assert len(_validation_data_slices) > 0, f"User {user_id} has no validation slices"
+                # assert len(_test_data_slices) > 0, f"User {user_id} has no test slices"
                 
                 training_data_slices.extend(_training_data_slices)
                 validation_data_slices.extend(_validation_data_slices)

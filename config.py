@@ -20,8 +20,8 @@ class Config:
     allow_negative_iauc_values: bool = True
 
     # Data slicing parameters
-    max_encoder_length: int = 8 * 4  # encoder window length (e.g., 32)
-    max_prediction_length: int = 2 * 4  # prediction horizon (e.g., 8)
+    max_encoder_length: int = 24 * 4  # encoder window length (e.g., 32)
+    max_prediction_length: int = 8 * 4  # prediction horizon (e.g., 8)
     evaluation_horizon_length: int = 2 * 4 # evaluation horizon length (e.g., 2)
 
     
@@ -31,11 +31,11 @@ class Config:
     no_data_cache: bool = False
     
     # Food Covariates    
-    include_food_covariates: bool = True
-    include_food_covariates_from_horizon: bool = True # If True, the food related covariates are "time varying known reals", else they are "time varying unknown reals"
+    include_food_covariates: bool = False
+    include_food_covariates_from_horizon: bool = False # If True, the food related covariates are "time varying known reals", else they are "time varying unknown reals"
     
     # User Demographics Covariates
-    include_user_demographics_covariates: bool = True
+    include_user_demographics_covariates: bool = False
     scale_target_by_user_id: bool = True
 
     # DataLoader parameters
@@ -64,7 +64,7 @@ class Config:
     max_epochs: int = 30  # Early stopping can likely kick in before this, unless its disabled
     gradient_clip_val: float = 0.1
     
-    loss: str = "ApproximateCRPS" # "QuantileLoss" or "ApproximateCRPS" or "RMSE"    
+    loss: str = "QuantileLoss" # "QuantileLoss" or "ApproximateCRPS" or "RMSE"    
     optimizer: str = "adamw" # cannot change this atm 
     optimizer_weight_decay: float = 0.05
 

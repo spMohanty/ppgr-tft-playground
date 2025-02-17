@@ -3,17 +3,17 @@
 #SBATCH --gpus=1
 #SBATCH --mem-per-gpu=32G
 #SBATCH --cpus-per-gpu=8
-#SBATCH --partition=l40s
+#SBATCH --partition=h100
 #SBATCH --time=12:00:00
 #SBATCH --output=logs/slurm/%j.out
 #SBATCH --error=logs/slurm/%j.err
 
 # Configuration variables
 WANDB_ENTITY="mfr-ppgr-2025"
-WANDB_PROJECT="tft-ppgr-2025"
-WANDB_SWEEP_ID="geysk990"
+WANDB_PROJECT="tft-ppgr-2025-ablation-v0"
+WANDB_SWEEP_ID="arc313jm"
 
-NUM_AGENTS=2 # 6 for h100 and 3 for l40s
+NUM_AGENTS=2 # 3 for h100 and 1 for l40s
 
 cd /home/mohanty/food/pytorch-forecasting-playground
 
