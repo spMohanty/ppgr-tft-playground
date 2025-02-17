@@ -17,5 +17,5 @@ source ~/.bashrc
 micromamba activate ppgr
 
 
-time python run.py --max_encoder_length 96
+time python run.py "$@"
 
