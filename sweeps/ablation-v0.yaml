@@ -1,7 +1,7 @@
 # wandb: Creating sweep from: sweeps/ablation-v0.yaml
-# wandb: Creating sweep with ID: u6s3pker
-# wandb: View sweep at: https://wandb.ai/mfr-ppgr-2025/tft-ppgr-2025-ablation-v0/sweeps/u6s3pker
-# wandb: Run sweep agent with: wandb agent mfr-ppgr-2025/tft-ppgr-2025-ablation-v0/u6s3pker
+# wandb: Creating sweep with ID: iut4zz14
+# wandb: View sweep at: https://wandb.ai/mfr-ppgr-2025/tft-ppgr-2025-ablation-v0/sweeps/iut4zz14
+# wandb: Run sweep agent with: wandb agent mfr-ppgr-2025/tft-ppgr-2025-ablation-v0/iut4zz14
 
 program: run.py
 command:

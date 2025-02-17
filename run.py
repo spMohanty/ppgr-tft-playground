@@ -64,6 +64,7 @@ def build_callbacks(config: Config) -> (list, PPGRMetricsCallback):
         callbacks.append(early_stop_callback)
 
     if not config.disable_checkpoints:
+        logger.info(f"Disable checkpoints is ??? {config.disable_checkpoints}")
         logger.info(f"Using checkpoint directory: {config.checkpoint_dir}")
         checkpoint_callback = ModelCheckpoint(
             monitor=config.checkpoint_monitor_metric,
@@ -96,6 +97,7 @@ def build_trainer(config: Config, callbacks: list, wandb_logger: WandbLogger) ->
         logger=wandb_logger,
         val_check_interval=config.val_check_interval,
         log_every_n_steps=config.trainer_log_every_n_steps,
+        enable_checkpointing=not config.disable_checkpoints,
     )
 
 @click.command()
@@ -198,6 +200,8 @@ def main(**kwargs):
 
     # Build callbacks.
     callbacks, ppgr_metrics_test_callback = build_callbacks(config)
+    
+    logger.info(f"Callbacks: {callbacks}")
 
     # Build the trainer.
     trainer = build_trainer(config, callbacks, wandb_logger)
@@ -206,7 +210,8 @@ def main(**kwargs):
     trainer.fit(tft_model, train_dataloaders=train_loader, val_dataloaders=val_loader)
 
     # Run testing.
-    trainer.test(tft_model, dataloaders=test_loader, ckpt_path="best")
+    ckpt_path = "best" if not config.disable_checkpoints else None
+    trainer.test(tft_model, dataloaders=test_loader, ckpt_path=ckpt_path)
 
     # Print final test metrics.
     final_test_metrics = ppgr_metrics_test_callback.final_metrics
