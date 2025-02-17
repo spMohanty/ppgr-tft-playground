@@ -20,7 +20,7 @@ class Config:
     allow_negative_iauc_values: bool = True
 
     # Data slicing parameters
-    max_encoder_length: int = 48 * 4  # encoder window length (e.g., 32)
+    max_encoder_length: int = 8 * 4  # encoder window length (e.g., 32)
     max_prediction_length: int = 2 * 4  # prediction horizon (e.g., 8)
     evaluation_horizon_length: int = 2 * 4 # evaluation horizon length (e.g., 2)
 
@@ -36,10 +36,10 @@ class Config:
     
     # User Demographics Covariates
     include_user_demographics_covariates: bool = True
-
+    scale_target_by_user_id: bool = True
 
     # DataLoader parameters
-    batch_size: int = 256
+    batch_size: int = 1024
     num_workers: int = 8
 
     # Model hyperparameters

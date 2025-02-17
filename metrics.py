@@ -282,8 +282,11 @@ class PPGRMetricsCallback(pl.Callback):
                 
             if row == 0 and col == 0:
                 # remove x ticks and labels
-                ax.set_xticks([])
-                ax.set_xlabel('')
+                
+                # Only if there are more than 1 metric to plot
+                if len(metrics_to_plot) > 1:
+                    ax.set_xticks([])
+                    ax.set_xlabel('')
                 
             if row == 1 and col == 0:
                 # do nothing 

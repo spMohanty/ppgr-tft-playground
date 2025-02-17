@@ -172,9 +172,18 @@ def prepare_time_series_slices(
             if n_samples > 0:
                 train_end = int((1 - validation_percentage - test_percentage) * n_samples)
                 val_end = int((1 - test_percentage) * n_samples)
-                training_data_slices.extend(user_slices[:train_end])
-                validation_data_slices.extend(user_slices[train_end:val_end])
-                test_data_slices.extend(user_slices[val_end:])
+                
+                _training_data_slices = user_slices[:train_end]
+                _validation_data_slices = user_slices[train_end:val_end]
+                _test_data_slices = user_slices[val_end:]
+                
+                assert len(_training_data_slices) > 0, f"User {user_id} has no training slices"
+                assert len(_validation_data_slices) > 0, f"User {user_id} has no validation slices"
+                assert len(_test_data_slices) > 0, f"User {user_id} has no test slices"
+                
+                training_data_slices.extend(_training_data_slices)
+                validation_data_slices.extend(_validation_data_slices)
+                test_data_slices.extend(_test_data_slices)
             
             progress.update(user_task, advance=1)
             progress.remove_task(food_task)
@@ -197,6 +206,9 @@ def create_time_series_dataset(
     include_food_covariates_from_horizon: bool = True,
     include_user_demographics_covariates: bool = True,
     
+    scale_target_by_user_id: bool = True,
+
+    training_dataset_parameters: Dict[str, Any] = None,
 ) -> TimeSeriesDataSet:
     """
     Create a TimeSeriesDataSet from a DataFrame for PyTorch Forecasting.
@@ -212,7 +224,8 @@ def create_time_series_dataset(
         time_varying_known_reals += food_covariates
     else:
         time_varying_unknown_reals += food_covariates
-        
+    
+    time_varying_known_categoricals = ["loc_eaten_dow", "loc_eaten_dow_type", "loc_eaten_season"]
         
     static_categoricals = [] # user_id used to be here, but removing it, to make the model more invariant to the user_id
     static_reals = []
@@ -228,6 +241,30 @@ def create_time_series_dataset(
     # For static reals, replace NaN values with the mean of the column
     for col in static_reals:
         ppgr_dataset_df[col] = ppgr_dataset_df[col].fillna(ppgr_dataset_df[col].mean())
+        
+    
+        
+    if training_dataset_parameters is None:
+    # If not provided: Create categorical encoders (with NaNLabelEncoder)
+        categorical_encoders = {}        
+        for col in static_categoricals + time_varying_known_categoricals:
+            categorical_encoders[col] = NaNLabelEncoder(add_nan=True)
+        
+        # If not provided: Let the class fit scalers for all real variables    
+        scalers = {}
+        
+        # If not provided: Instantiate target normalizer
+        if scale_target_by_user_id:
+            target_normalizer = GroupNormalizer(
+                groups=["user_id"], transformation="softplus"
+            )
+        else:
+            target_normalizer = None
+    else:
+        logger.info(f"Using parameters from the training set to create the validation and test sets: {training_dataset_parameters}")
+        categorical_encoders = training_dataset_parameters["categorical_encoders"]
+        scalers = training_dataset_parameters["scalers"]
+        target_normalizer = training_dataset_parameters["target_normalizer"]
     
     dataset = TimeSeriesDataSet(
         ppgr_dataset_df,
@@ -240,40 +277,16 @@ def create_time_series_dataset(
         max_prediction_length=max_prediction_length,
         static_categoricals=static_categoricals,
         static_reals=static_reals,
-        time_varying_known_categoricals=[
-            "loc_eaten_dow",
-            "loc_eaten_dow_type",
-            "loc_eaten_season"
-        ],
+        time_varying_known_categoricals=time_varying_known_categoricals,
         time_varying_known_reals=time_varying_known_reals,
         time_varying_unknown_categoricals=[],
         time_varying_unknown_reals=time_varying_unknown_reals,
-        target_normalizer=GroupNormalizer(
-            groups=["user_id"], transformation="softplus"
-        ),
         add_relative_time_idx=True,
-        add_target_scales=True,
-        add_encoder_length=True,
-        categorical_encoders={ # TODO: Fix this
-            "user__age": NaNLabelEncoder(add_nan=True),
-            "user__weight": NaNLabelEncoder(add_nan=True),
-            "user__height": NaNLabelEncoder(add_nan=True),
-            "user__bmi": NaNLabelEncoder(add_nan=True),
-            "user__edu_degree": NaNLabelEncoder(add_nan=True),
-            "user__income": NaNLabelEncoder(add_nan=True),
-            "user__household_desc": NaNLabelEncoder(add_nan=True),
-            "user__job_status": NaNLabelEncoder(add_nan=True),
-            "user__smoking": NaNLabelEncoder(add_nan=True),
-            "user__general_hunger_level": NaNLabelEncoder(add_nan=True),
-            "user__morning_hunger_level": NaNLabelEncoder(add_nan=True),
-            "user__mid_hunger_level": NaNLabelEncoder(add_nan=True),
-            "user__evening_hunger_level": NaNLabelEncoder(add_nan=True),
-            "user__health_state": NaNLabelEncoder(add_nan=True),
-            "user__physical_activities_frequency": NaNLabelEncoder(add_nan=True),
-            "loc_eaten_dow": NaNLabelEncoder(add_nan=True),
-            "loc_eaten_dow_type": NaNLabelEncoder(add_nan=True),
-            "loc_eaten_season": NaNLabelEncoder(add_nan=True),
-        },
+        add_target_scales=False,
+        add_encoder_length=False,
+        target_normalizer=target_normalizer,
+        categorical_encoders=categorical_encoders,
+        scalers=scalers,
         predict_mode=predict_mode,
     )
     return dataset
@@ -342,8 +355,19 @@ def get_cached_time_series_datasets(
             predict_mode=False, 
             include_food_covariates=config.include_food_covariates,
             include_food_covariates_from_horizon=config.include_food_covariates_from_horizon,
-            include_user_demographics_covariates=config.include_user_demographics_covariates
+            include_user_demographics_covariates=config.include_user_demographics_covariates,
+            
+            scale_target_by_user_id=config.scale_target_by_user_id,
         )
+        
+        ### NOTE: We monkey path pytorch-forecasting manually to ensure that
+        ### all the categorical encoders are fit with add_nan=True, warn=True
+        ### This allows us to use the categorical encoders consistently in the training set
+        
+        ### TODO: mess up the group specific categorical encoders
+        ###       to force the model to not learn timeseries cluster specific quirks
+                
+        training_dataset_parameters = training_dataset.get_parameters()
         
         validation_dataset = create_time_series_dataset(
             val_df, 
@@ -355,6 +379,8 @@ def get_cached_time_series_datasets(
             include_food_covariates=config.include_food_covariates,
             include_food_covariates_from_horizon=config.include_food_covariates_from_horizon,
             include_user_demographics_covariates=config.include_user_demographics_covariates,
+            
+            training_dataset_parameters=training_dataset_parameters            
         )
         
         test_dataset = create_time_series_dataset(
@@ -367,6 +393,8 @@ def get_cached_time_series_datasets(
             include_food_covariates=config.include_food_covariates,
             include_food_covariates_from_horizon=config.include_food_covariates_from_horizon,
             include_user_demographics_covariates=config.include_user_demographics_covariates,
+            
+            training_dataset_parameters=training_dataset_parameters            
         )
         
         # training_dataset_parameters = training_dataset.get_parameters()
