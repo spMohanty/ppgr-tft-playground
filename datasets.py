@@ -369,6 +369,17 @@ def get_cached_time_series_datasets(
                 
         training_dataset_parameters = training_dataset.get_parameters()
         
+        ### NOTE: IMPORTANT : If you are having errors with the categorical encoders, 
+        ###       you can try to comment out these lines by using a custom installation of pytorch-forecasting
+        ###       
+        ###       https://github.com/sktime/pytorch-forecasting/blob/15df81309b5f4b39058899e3e02b46fc756e2841/pytorch_forecasting/data/timeseries.py#L1827-L1830
+        ###
+        ###       This is because of how we use the timeseries_cluster_id and it does not always exist in the validation and test sets.
+        ###       This is a hack to ensure that the categorical encoders are fit correctly. 
+        ###
+        ###       You will also need to change all the NanLabelEncoder instantiations in the file above to use add_nan=True, warn=True
+        ###
+        
         validation_dataset = create_time_series_dataset(
             val_df, 
             users_demographics_df=users_demographics_df,            
