@@ -11,7 +11,7 @@
 # Configuration variables
 WANDB_ENTITY="mfr-ppgr-2025"
 WANDB_PROJECT="tft-ppgr-2025-ablation-v0"
-WANDB_SWEEP_ID="arc313jm"
+WANDB_SWEEP_ID="u6s3pker"
 
 NUM_AGENTS=2 # 3 for h100 and 1 for l40s
 
