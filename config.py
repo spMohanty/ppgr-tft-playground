@@ -35,7 +35,7 @@ class Config:
     include_food_covariates_from_horizon: bool = False # If True, the food related covariates are "time varying known reals", else they are "time varying unknown reals"
     
     # User Demographics Covariates
-    include_user_demographics_covariates: bool = False
+    include_user_demographics_covariates: bool = True
     scale_target_by_user_id: bool = True
 
     # DataLoader parameters
@@ -77,7 +77,7 @@ class Config:
     lr_scheduler_cycle_momentum: bool = False
     
     # Precision parameters
-    training_precision: str = "fp32" # "bf16" or "fp32" (output_layer of the model still runs in fp32)
+    training_precision: str = "32" # "bf16" or "32" (output_layer of the model still runs in fp32)
     
     val_check_interval: float = 0.5
     trainer_log_every_n_steps: int = 1
