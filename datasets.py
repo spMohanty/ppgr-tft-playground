@@ -116,7 +116,8 @@ def create_slice(
     df: pd.DataFrame, slice_start: int, slice_end: int
 ) -> pd.DataFrame:
     """Helper to create a time-series slice with a unique cluster id and time index."""
-    df_slice = df.iloc[slice_start:slice_end].copy()
+    # df_slice = df.iloc[slice_start:slice_end].copy()
+    df_slice = df.loc[slice_start:slice_end].copy()
     df_slice["time_series_cluster_id"] = str(uuid.uuid4())
     df_slice["time_idx"] = list(range(len(df_slice)))
     return df_slice
@@ -146,6 +147,9 @@ def prepare_time_series_slices(
         console=console,
     )
     
+    # Sort df index, to make slicing easier later
+    df = df.sort_index()
+    
     with progress:
         user_task = progress.add_task("[cyan]Processing users...", total=len(df.groupby("user_id")))
         
@@ -160,10 +164,25 @@ def prepare_time_series_slices(
             user_slices = []
             food_task = progress.add_task(f"[green]Processing User {user_id}", total=len(food_intake_rows))
             
-            for row_idx, _ in food_intake_rows.iterrows():
+            for row_idx, food_intake_row in food_intake_rows.iterrows():
                 slice_start = row_idx - max_encoder_length + 1
-                slice_end = row_idx + max_prediction_length + 1
+                slice_end = row_idx + max_prediction_length
+                
                 df_slice = create_slice(df, slice_start, slice_end)
+                
+                food_intake_row_values = df_slice["food_intake_row"].values
+                
+                # Ensure the food intake row is at the expected location
+                ## NOTE: These checks only work, because in our dataset, all the timeseries blocks are of fixed length
+                assert food_intake_row.name == df_slice.iloc[max_encoder_length-1].name 
+                assert df_slice.iloc[max_encoder_length-1].food_intake_row == True
+                assert food_intake_row_values[max_encoder_length-1] == 1
+                
+                try:                
+                    assert len(df_slice) == max_encoder_length + max_prediction_length, f"Group {row_idx} has the wrong number of rows. Expected {max_encoder_length + max_prediction_length}, got {len(df_slice)}"
+                except Exception as e:
+                    breakpoint()
+                
                 user_slices.append(df_slice)
                 progress.update(food_task, advance=1)
             
@@ -250,6 +269,7 @@ def create_time_series_dataset(
         for col in static_categoricals + time_varying_known_categoricals:
             categorical_encoders[col] = NaNLabelEncoder(add_nan=True)
         
+        # THIS BLOCK IS DISABLED, BECAUSE THIS ENDS UP CREATING A LEAK BETWEEN THE TRAINING AND TEST SETS, via the scalers
         # If not provided: Let the class fit scalers for all real variables    
         scalers = {}
         
@@ -342,6 +362,19 @@ def get_cached_time_series_datasets(
             train_df = merge_ppgr_and_users_demographics(train_df, users_demographics_df)
             val_df = merge_ppgr_and_users_demographics(val_df, users_demographics_df)
             test_df = merge_ppgr_and_users_demographics(test_df, users_demographics_df)
+            
+        
+        # Add a separate check to ensure that the food intake row is at the expected location
+        # for idx, group in train_df.groupby("time_series_cluster_id"):
+        #     assert group["user_id"].nunique() == 1, f"Group {idx} has more than one user_id"
+        #     assert group.iloc[config.max_encoder_length-1].food_intake_row == True, f"Food intake row is not at the expected location for group {idx}"
+        #     assert len(group) == config.max_encoder_length + config.max_prediction_length, f"Group {idx} has the wrong number of rows. Expected {config.max_encoder_length + config.max_prediction_length}, got {len(group)}"            
+        
+        # copy food_intake_row column to food__food_intake_row and store it as 0, 1
+        # this ensures that this is available as a covariate in the model
+        train_df["food__food_intake_row"] = train_df["food_intake_row"].astype(int)
+        val_df["food__food_intake_row"] = val_df["food_intake_row"].astype(int)
+        test_df["food__food_intake_row"] = test_df["food_intake_row"].astype(int)
         
         # Determine food covariates (all columns beginning with "food__")
         food_covariates = [col for col in train_df.columns if col.startswith("food__")]
@@ -518,6 +551,7 @@ if __name__ == "__main__":
         print(f"past_data: {past_data}")
         print(f"future_data: {future_data}")
                 
+        # breakpoint()
         break  # Only process one batch for testing purposes.
     
     print("\nTest run completed successfully!")

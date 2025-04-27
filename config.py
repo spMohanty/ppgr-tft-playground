@@ -20,8 +20,8 @@ class Config:
     allow_negative_iauc_values: bool = True
 
     # Data slicing parameters
-    max_encoder_length: int = 8 * 4  # encoder window length (e.g., 32)
-    max_prediction_length: int = 8 * 4  # prediction horizon (e.g., 8)
+    max_encoder_length: int = 12 * 4  # encoder window length (e.g., 32)
+    max_prediction_length: int = 4 * 4  # prediction horizon (e.g., 8)
     evaluation_horizon_length: int = 2 * 4 # evaluation horizon length (e.g., 2)
 
     
@@ -31,15 +31,15 @@ class Config:
     no_data_cache: bool = False
     
     # Food Covariates    
-    include_food_covariates: bool = False
-    include_food_covariates_from_horizon: bool = False # If True, the food related covariates are "time varying known reals", else they are "time varying unknown reals"
+    include_food_covariates: bool = True
+    include_food_covariates_from_horizon: bool = True # If True, the food related covariates are "time varying known reals", else they are "time varying unknown reals"
     
     # User Demographics Covariates
     include_user_demographics_covariates: bool = True
     scale_target_by_user_id: bool = True
 
     # DataLoader parameters
-    batch_size: int = 256
+    batch_size: int = 256 * 4
     num_workers: int = 8
 
     # Model hyperparameters
@@ -77,7 +77,7 @@ class Config:
     lr_scheduler_cycle_momentum: bool = False
     
     # Precision parameters
-    training_precision: str = "32" # "bf16" or "32" (output_layer of the model still runs in fp32)
+    training_precision: str = "bf16" # "bf16" or "32" (output_layer of the model still runs in fp32)
     
     val_check_interval: float = 0.5
     trainer_log_every_n_steps: int = 1

@@ -69,6 +69,107 @@ from torch.optim import AdamW
 from torch.optim.lr_scheduler import OneCycleLR
 
 
+class RotaryPositionalEmbeddings(nn.Module):
+    """
+    Rotary Positional Embeddings (RoPE) as proposed in https://arxiv.org/abs/2104.09864.
+    
+    This implementation supports offset indices to handle negative positions.
+    """
+    def __init__(
+        self,
+        dim: int,
+        max_seq_len: int = 4096,
+        base: int = 10_000,
+        offset: int = 0
+    ) -> None:
+        """
+        Initialize rotary positional embeddings.
+        
+        Args:
+            dim: Hidden dimension size. Must be divisible by 2.
+            max_seq_len: Maximum sequence length the model is expected to handle.
+                         This determines the size of the position cache.
+            base: Base value for the frequency calculations.
+            offset: Position offset to handle negative indices (centering).
+        """
+        super().__init__()
+        self.dim = dim
+        self.base = base
+        self.max_seq_len = max_seq_len
+        self.offset = offset
+        
+        assert dim % 2 == 0, "RoPE dim must be divisible by 2"
+        self.rope_init()
+
+    def rope_init(self):
+        # Precompute frequency bands
+        theta = 1.0 / (
+            self.base
+            ** (torch.arange(0, self.dim, 2)[: (self.dim // 2)].float() / self.dim)
+        )
+        self.register_buffer("theta", theta)
+        self.build_rope_cache(self.max_seq_len)
+
+    def build_rope_cache(self, max_seq_len: int = 4096) -> None:
+        # Create position indexes from 0 to max_seq_len-1
+        seq_idx = torch.arange(
+            max_seq_len, dtype=torch.float, device=self.theta.device
+        )
+
+        # Outer product of theta and position index
+        idx_theta = torch.einsum("i, j -> ij", seq_idx, self.theta)
+        
+        # Cache includes both the cos and sin components
+        # Shape: [max_seq_len, dim//2, 2]
+        cache = torch.stack([torch.cos(idx_theta), torch.sin(idx_theta)], dim=-1)
+        self.register_buffer("cache", cache)
+
+    def forward(self, x: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
+        """
+        Apply rotary positional embeddings to input tensor.
+        
+        Args:
+            x: Input tensor of shape [batch_size, seq_len, dim]
+            positions: Position indices of shape [batch_size, seq_len]
+            
+        Returns:
+            Tensor with rotary embeddings applied
+        """
+        # Ensure positions include offset (for negative positions handling)
+        positions = positions + self.offset
+        
+        # Ensure position indices are within bounds
+        positions = torch.clamp(positions, 0, self.max_seq_len - 1)
+        
+        # Get batch size and sequence length
+        batch_size, seq_len = positions.shape
+        
+        # Get cached embeddings for the given positions
+        # Shape after indexing: [batch_size, seq_len, dim//2, 2]
+        rope_cache = self.cache[positions]
+        
+        # Reshape input for rotation
+        # From [batch_size, seq_len, dim] to [batch_size, seq_len, dim//2, 2]
+        x_reshaped = x.float().reshape(batch_size, seq_len, -1, 2)
+        
+        # Apply rotary transformation using the cached values
+        # cos(θ)x - sin(θ)y and sin(θ)x + cos(θ)y
+        x_out = torch.stack(
+            [
+                x_reshaped[..., 0] * rope_cache[..., 0] - 
+                x_reshaped[..., 1] * rope_cache[..., 1],
+                
+                x_reshaped[..., 1] * rope_cache[..., 0] + 
+                x_reshaped[..., 0] * rope_cache[..., 1],
+            ],
+            dim=-1,
+        )
+        
+        # Reshape back to original shape - ensure this matches the input shape
+        x_out = x_out.reshape(batch_size, seq_len, self.dim)
+        
+        # Return with the same dtype as the input
+        return x_out.type_as(x)
 
 class PPGRTemporalFusionTransformer(TemporalFusionTransformer):
     def __init__(
@@ -103,7 +204,10 @@ class PPGRTemporalFusionTransformer(TemporalFusionTransformer):
         
         # Additional inputs and settings
         max_encoder_length: int = 8 * 4, # 8 hours in 15 min steps
-        enforce_quantile_monotonicity: bool = False,        
+        enforce_quantile_monotonicity: bool = False,
+        
+        # Positional embeddings
+        use_rotary_positional_embeddings: bool = False,
         
         **kwargs,
     ):
@@ -120,6 +224,16 @@ class PPGRTemporalFusionTransformer(TemporalFusionTransformer):
 
         super().__init__(**kwargs)        
         
+        # Initialize rotary positional embeddings if enabled
+        self.use_rotary_positional_embeddings = use_rotary_positional_embeddings
+        if self.use_rotary_positional_embeddings:
+            logger.info("Initializing rotary positional embeddings")
+            total_range = max_encoder_length + 100  # a safe upper bound
+            self.positional_embeddings = RotaryPositionalEmbeddings(
+                dim=hidden_size,
+                base=10000,
+                offset=max_encoder_length  # Center positions around the last valid position
+            )
         
         logger.info("Setting up variable selection networks")
         self.setup_variable_selection_networks()
@@ -459,6 +573,37 @@ class PPGRTemporalFusionTransformer(TemporalFusionTransformer):
 
         
         # --------------------------------------------------------------------
+        # Apply positional encodings if enabled
+        # --------------------------------------------------------------------
+        if self.use_rotary_positional_embeddings:
+            # Generate position indices for encoder and decoder
+            B = embeddings_varying_encoder.size(0)
+            T_past = embeddings_varying_encoder.size(1)
+            T_future = embeddings_varying_decoder.size(1)
+            device = embeddings_varying_encoder.device
+            
+            # Generate time indices for positional embeddings
+            past_indices = torch.arange(T_past, device=device).unsqueeze(0).expand(B, -1)
+            future_indices = torch.arange(T_future, device=device).unsqueeze(0).expand(B, -1) + T_past
+            
+            # Center indices to make the last valid position have index 0
+            offset_value = max_encoder_length - 1
+            centered_offset = offset_value * torch.ones((B, 1), device=device, dtype=torch.long)
+            
+            # Apply centering to indices
+            past_indices = past_indices - centered_offset
+            future_indices = future_indices - centered_offset
+            
+            # Apply rotary positional embeddings
+            embeddings_varying_encoder = self.positional_embeddings(
+                embeddings_varying_encoder, past_indices
+            )
+            
+            embeddings_varying_decoder = self.positional_embeddings(
+                embeddings_varying_decoder, future_indices
+            )
+
+        # --------------------------------------------------------------------
         # Process inputs with Transformer
         # --------------------------------------------------------------------
         # We have "embeddings_varying_encoder" for the historical part (B x T_enc x hidden)
@@ -482,7 +627,7 @@ class PPGRTemporalFusionTransformer(TemporalFusionTransformer):
         causal_mask = nn.Transformer().generate_square_subsequent_mask(T_dec).to(
             embeddings_varying_decoder.device
         )
-
+        
         # Pass through the encoder
         transformer_encoder_output = self.transformer_encoder(
             src=embeddings_varying_encoder,  # B x T_enc x hidden
@@ -636,10 +781,28 @@ class PPGRTemporalFusionTransformer(TemporalFusionTransformer):
             prediction_kwargs = {}
 
         from matplotlib import pyplot as plt
+        import seaborn as sns
+
+        # Set the seaborn style and palette
+        sns.set_style("white")  # Changed from "whitegrid" to "white"
+        sns.set_palette("tab10")
+        palette = sns.color_palette("tab10")
+        
+        # Get colors from the palette
+        historical_color = palette[0]  # blue
+        ground_truth_color = palette[1]  # orange
+        quantile_fill_color = historical_color 
+        forecast_color = "darkblue" 
+        grid_color = sns.color_palette("Greys")[2]
+        meal_color = "purple"
 
         # all true values for y of the first sample in batch
         encoder_targets = to_list(x["encoder_target"])
         decoder_targets = to_list(x["decoder_target"])
+        
+        encoder_continuous = to_list(x["encoder_cont"])
+        decoder_continuous = to_list(x["decoder_cont"])
+        
 
         y_raws = to_list(
             out["prediction"]
@@ -649,8 +812,8 @@ class PPGRTemporalFusionTransformer(TemporalFusionTransformer):
 
         # for each target, plot
         figs = []
-        for y_raw, y_hat, y_quantile, encoder_target, decoder_target in zip(
-            y_raws, y_hats, y_quantiles, encoder_targets, decoder_targets
+        for y_raw, y_hat, y_quantile, encoder_target, decoder_target, encoder_continuous, decoder_continuous in zip(
+            y_raws, y_hats, y_quantiles, encoder_targets, decoder_targets, encoder_continuous, decoder_continuous
         ):
             y_all = torch.cat([encoder_target[idx], decoder_target[idx]])
             max_encoder_length = x["encoder_lengths"].max()
@@ -671,63 +834,113 @@ class PPGRTemporalFusionTransformer(TemporalFusionTransformer):
 
             # move to cpu
             y = y.detach().cpu().to(torch.float32)
+            
             # create figure
             if ax is None:
-                fig, ax = plt.subplots()
+                fig, ax = plt.subplots(figsize=(10, 6))
             else:
                 fig = ax.get_figure()
+                
             n_pred = y_hat.shape[0]
-            x_obs = np.arange(-(y.shape[0] - n_pred), 0)
-            x_pred = np.arange(n_pred)
-            prop_cycle = iter(plt.rcParams["axes.prop_cycle"])
-            obs_color = next(prop_cycle)["color"]
-            pred_color = next(prop_cycle)["color"]
-            # plot observed history
-            if len(x_obs) > 0:
-                if len(x_obs) > 1:
-                    plotter = ax.plot
-                else:
-                    plotter = ax.scatter
-                plotter(x_obs, y[:-n_pred], label="observed", c=obs_color)
-            if len(x_pred) > 1:
-                plotter = ax.plot
+            
+            # Create time indices for both history and forecast
+            T_context = y.shape[0] - n_pred
+            T_forecast = n_pred
+            x_hist = list(range(-T_context + 1, 1))
+            x_pred = list(range(1, T_forecast + 1))
+            
+            # Plot historical glucose - check if we need scatter or plot
+            if len(x_hist) > 1:
+                ax.plot(x_hist, y[:-n_pred], marker="o", markersize=3, 
+                       label="Historical Glucose", color=historical_color, linewidth=1.5)
             else:
-                plotter = ax.scatter
-
-            # plot observed prediction
+                ax.scatter(x_hist, y[:-n_pred], marker="o", s=30, 
+                          label="Historical Glucose", color=historical_color)
+            
+            # Plot ground truth (if requested)
             if show_future_observed:
-                plotter(x_pred, y[-n_pred:], label=None, c=obs_color)
-
-            # plot prediction
-            plotter(x_pred, y_hat, label="predicted", c=pred_color)
-
-            # plot predicted quantiles
-            plotter(
-                x_pred,
-                y_quantile[:, y_quantile.shape[1] // 2],
-                c=pred_color,
-                alpha=0.15,
-            )
-            for i in range(y_quantile.shape[1] // 2):
+                if len(x_pred) > 1:
+                    ax.plot(x_pred, y[-n_pred:], marker="o", markersize=3,
+                           label="Ground Truth", color=ground_truth_color, linewidth=1.5)
+                else:
+                    ax.scatter(x_pred, y[-n_pred:], marker="o", s=30,
+                              label="Ground Truth", color=ground_truth_color)
+            
+            # Plot median forecast
+            median_index = y_quantile.shape[1] // 2
+            if len(x_pred) > 1:
+                ax.plot(x_pred, y_hat, marker="o", markersize=3, 
+                       label="Median Forecast", color=forecast_color, linewidth=1.5)
+            else:
+                ax.scatter(x_pred, y_hat, marker="o", s=30, 
+                          label="Median Forecast", color=forecast_color)
+            
+            # Plot quantile intervals with gradient opacity, similar to plot_forecast_examples
+            # The median_index is the middle point (e.g., 4 if there are 9 quantiles)
+            for qi in range(y_quantile.shape[1] - 1):
+                # Calculate alpha based on distance from median, matching plot_forecast_examples approach
+                alpha_val = 0.1 + (abs(qi - median_index)) * 0.05
+                
+                # Get lower and upper bounds (ensuring they're in correct order)
+                q_lower = torch.minimum(y_quantile[:, qi], y_quantile[:, qi+1])
+                q_upper = torch.maximum(y_quantile[:, qi], y_quantile[:, qi+1])
+                
                 if len(x_pred) > 1:
                     ax.fill_between(
                         x_pred,
-                        y_quantile[:, i],
-                        y_quantile[:, -i - 1],
-                        alpha=0.15,
-                        fc=pred_color,
+                        q_lower,
+                        q_upper,
+                        color=quantile_fill_color,
+                        alpha=alpha_val
                     )
                 else:
+                    # Handle single point case
                     quantiles = torch.tensor(
-                        [[y_quantile[0, i]], [y_quantile[0, -i - 1]]]
+                        [[y_quantile[0, qi]], [y_quantile[0, qi+1]]]
                     )
                     ax.errorbar(
                         x_pred,
                         y[[-n_pred]],
                         yerr=quantiles - y[-n_pred],
-                        c=pred_color,
+                        color=quantile_fill_color,
                         capsize=1.0,
                     )
+
+            # Add food consumption lines
+            food_key = "food__food_intake_row"
+            if food_key in self.hparams.dataset_parameters["scalers"].keys():
+                food_intake_row_scaler = self.hparams.dataset_parameters["scalers"][food_key]
+                
+                index_food_eaten = self.hparams.x_reals.index(food_key)
+                
+                # Get unscaled values 
+                food_intake_row_scaled_past = encoder_continuous[idx, :, index_food_eaten].detach().cpu().numpy()
+                food_intake_row_scaled_future  = decoder_continuous[idx, :, index_food_eaten].detach().cpu().numpy()
+
+                # Inverse transform
+                food_intake_row_past = food_intake_row_scaled_past > food_intake_row_scaled_past.min()
+                food_intake_row_future = food_intake_row_scaled_future > food_intake_row_scaled_future.min()
+
+                food_intake_row_indices_past = np.where(food_intake_row_past)[0]
+                food_intake_row_indices_future = np.where(food_intake_row_future)[0]
+                
+                # update indices to the relative timesteps
+                food_intake_row_indices_past = food_intake_row_indices_past - T_context + 1
+                food_intake_row_indices_future = food_intake_row_indices_future  + 1
+                
+                try:
+                    # Double check to ensure that there is a food intake at T_context - 1
+                    assert 0 in food_intake_row_indices_past, "There should be a food intake at the last timestep of the past indices"
+                except Exception as e:
+                    breakpoint()
+                
+                # Plot vertical lines for each meal consumption time
+                meal_label_added = False
+                for idx in np.concatenate([food_intake_row_indices_past, food_intake_row_indices_future]):
+                    ax.axvline(x=idx, color=meal_color, linestyle="--", alpha=0.7, 
+                              label="Meal Consumption" if not meal_label_added else None)
+                    meal_label_added = True
+                                
     
             if add_loss_to_title is not False:
                 if isinstance(add_loss_to_title, bool):
@@ -738,7 +951,7 @@ class PPGRTemporalFusionTransformer(TemporalFusionTransformer):
                     loss = add_loss_to_title
                 else:
                     raise ValueError(
-                        f"add_loss_to_title '{add_loss_to_title}'' is unkown"
+                        f"add_loss_to_title '{add_loss_to_title}'' is unknown"
                     )
                 if isinstance(loss, MASE):
                     loss_value = loss(
@@ -751,9 +964,34 @@ class PPGRTemporalFusionTransformer(TemporalFusionTransformer):
                         loss_value = "-"
                 else:
                     loss_value = loss
-                ax.set_title(f"Loss {loss_value}")
-            ax.set_xlabel("Time index")
-            fig.legend()
+                ax.set_title(f"Glucose Forecast - #{idx} (Loss: {loss_value})", fontsize=13, fontweight='bold')
+            else:
+                ax.set_title(f"Glucose Forecast - #{idx}", fontsize=13, fontweight='bold')
+                
+            # Add proper labels
+            ax.set_xlabel("Relative Timestep", fontsize=11)
+            ax.set_ylabel("Glucose Level (mmol/L)", fontsize=11)
+            
+            # Remove grid lines - we're using a clean white background now
+            ax.grid(False)
+            
+            # Add a vertical line at t=0 to mark the forecast start
+            # ax.axvline(x=0, color=palette[4], linestyle='--', alpha=0.7, linewidth=1.5)
+            
+            # Improve legend
+            ax.legend(loc="best", fontsize=10, framealpha=0.9, edgecolor=grid_color)
+            
+            # Use pure white background
+            ax.set_facecolor('white')
+            
+            # Add subtle spines
+            for spine in ax.spines.values():
+                spine.set_edgecolor(grid_color)
+                spine.set_linewidth(0.8)
+            
+            # Adjust layout
+            fig.tight_layout()
+            
             figs.append(fig)
 
         # return multiple of target is a list, otherwise return single figure

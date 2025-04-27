@@ -120,6 +120,8 @@ def main(**kwargs):
     # In debug mode, run only one epoch.
     if config.debug_mode:
         config.max_epochs = 1
+        config.include_food_covariates = True
+        config.include_food_covariates_from_horizon = False
 
     # Override config parameters if running a sweep.
     override_config_from_wandb(config)
