@@ -803,6 +803,11 @@ class PPGRTemporalFusionTransformer(TemporalFusionTransformer):
         encoder_continuous = to_list(x["encoder_cont"])
         decoder_continuous = to_list(x["decoder_cont"])
         
+        
+        
+        food_params_as_unknown_reals = self.hparams.dataset_parameters["time_varying_unknown_reals"]
+        food_params_as_unknown_reals = [param for param in food_params_as_unknown_reals if param.startswith("food__")]
+        
 
         y_raws = to_list(
             out["prediction"]
@@ -910,33 +915,38 @@ class PPGRTemporalFusionTransformer(TemporalFusionTransformer):
             food_key = "food__food_intake_row"
             if food_key in self.hparams.dataset_parameters["scalers"].keys():
                 food_intake_row_scaler = self.hparams.dataset_parameters["scalers"][food_key]
+                is_food_in_future = len(food_params_as_unknown_reals) > 0
                 
                 index_food_eaten = self.hparams.x_reals.index(food_key)
                 
                 # Get unscaled values 
                 food_intake_row_scaled_past = encoder_continuous[idx, :, index_food_eaten].detach().cpu().numpy()
-                food_intake_row_scaled_future  = decoder_continuous[idx, :, index_food_eaten].detach().cpu().numpy()
+                if is_food_in_future: food_intake_row_scaled_future  = decoder_continuous[idx, :, index_food_eaten].detach().cpu().numpy()
 
                 # Inverse transform
                 food_intake_row_past = food_intake_row_scaled_past > food_intake_row_scaled_past.min()
-                food_intake_row_future = food_intake_row_scaled_future > food_intake_row_scaled_future.min()
+                if is_food_in_future: food_intake_row_future = food_intake_row_scaled_future > food_intake_row_scaled_future.min()
 
                 food_intake_row_indices_past = np.where(food_intake_row_past)[0]
-                food_intake_row_indices_future = np.where(food_intake_row_future)[0]
+                if is_food_in_future: food_intake_row_indices_future = np.where(food_intake_row_future)[0]
                 
                 # update indices to the relative timesteps
                 food_intake_row_indices_past = food_intake_row_indices_past - T_context + 1
-                food_intake_row_indices_future = food_intake_row_indices_future  + 1
+                if is_food_in_future: food_intake_row_indices_future = food_intake_row_indices_future  + 1
                 
-                try:
-                    # Double check to ensure that there is a food intake at T_context - 1
-                    assert 0 in food_intake_row_indices_past, "There should be a food intake at the last timestep of the past indices"
-                except Exception as e:
-                    breakpoint()
                 
+                # Double check to ensure that there is a food intake at relative timestep 0
+                assert 0 in food_intake_row_indices_past, "There should be a food intake at the last timestep of the past indices"
+            
                 # Plot vertical lines for each meal consumption time
                 meal_label_added = False
-                for idx in np.concatenate([food_intake_row_indices_past, food_intake_row_indices_future]):
+                
+                meal_consumption_indices = food_intake_row_indices_past
+                
+                if is_food_in_future:
+                    meal_consumption_indices = np.concatenate([food_intake_row_indices_past, food_intake_row_indices_future])
+                
+                for idx in meal_consumption_indices:
                     ax.axvline(x=idx, color=meal_color, linestyle="--", alpha=0.7, 
                               label="Meal Consumption" if not meal_label_added else None)
                     meal_label_added = True

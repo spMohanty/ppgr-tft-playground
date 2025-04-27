@@ -176,12 +176,8 @@ def prepare_time_series_slices(
                 ## NOTE: These checks only work, because in our dataset, all the timeseries blocks are of fixed length
                 assert food_intake_row.name == df_slice.iloc[max_encoder_length-1].name 
                 assert df_slice.iloc[max_encoder_length-1].food_intake_row == True
-                assert food_intake_row_values[max_encoder_length-1] == 1
-                
-                try:                
-                    assert len(df_slice) == max_encoder_length + max_prediction_length, f"Group {row_idx} has the wrong number of rows. Expected {max_encoder_length + max_prediction_length}, got {len(df_slice)}"
-                except Exception as e:
-                    breakpoint()
+                assert food_intake_row_values[max_encoder_length-1] == 1                
+                assert len(df_slice) == max_encoder_length + max_prediction_length, f"Group {row_idx} has the wrong number of rows. Expected {max_encoder_length + max_prediction_length}, got {len(df_slice)}"
                 
                 user_slices.append(df_slice)
                 progress.update(food_task, advance=1)
@@ -239,11 +235,12 @@ def create_time_series_dataset(
     time_varying_unknown_reals = ["val"]
     
     # Add food covariates to the appropriate location
-    if include_food_covariates_from_horizon:
-        time_varying_known_reals += food_covariates
-    else:
-        time_varying_unknown_reals += food_covariates
-    
+    if include_food_covariates:
+        if include_food_covariates_from_horizon:
+            time_varying_known_reals += food_covariates
+        else:
+            time_varying_unknown_reals += food_covariates
+            
     time_varying_known_categoricals = ["loc_eaten_dow", "loc_eaten_dow_type", "loc_eaten_season"]
         
     static_categoricals = [] # user_id used to be here, but removing it, to make the model more invariant to the user_id
@@ -378,6 +375,7 @@ def get_cached_time_series_datasets(
         
         # Determine food covariates (all columns beginning with "food__")
         food_covariates = [col for col in train_df.columns if col.startswith("food__")]
+        
                 
         training_dataset = create_time_series_dataset(
             train_df, 
