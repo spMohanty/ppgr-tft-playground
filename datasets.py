@@ -240,7 +240,11 @@ def create_time_series_dataset(
             time_varying_known_reals += food_covariates
         else:
             time_varying_unknown_reals += food_covariates
-            
+    
+    if include_food_covariates_from_horizon and not include_food_covariates:
+        raise ValueError("include_food_covariates_from_horizon is True, but include_food_covariates is False. This is not allowed.")
+    
+    
     time_varying_known_categoricals = ["loc_eaten_dow", "loc_eaten_dow_type", "loc_eaten_season"]
         
     static_categoricals = [] # user_id used to be here, but removing it, to make the model more invariant to the user_id

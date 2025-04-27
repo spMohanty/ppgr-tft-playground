@@ -923,9 +923,21 @@ class PPGRTemporalFusionTransformer(TemporalFusionTransformer):
                 food_intake_row_scaled_past = encoder_continuous[idx, :, index_food_eaten].detach().cpu().numpy()
                 if is_food_in_future: food_intake_row_scaled_future  = decoder_continuous[idx, :, index_food_eaten].detach().cpu().numpy()
 
-                # Inverse transform
-                food_intake_row_past = food_intake_row_scaled_past > food_intake_row_scaled_past.min()
-                if is_food_in_future: food_intake_row_future = food_intake_row_scaled_future > food_intake_row_scaled_future.min()
+                # Better approach to detect boolean values in scaled data
+                # First check if we only have a single item or multiple items
+                if len(food_intake_row_scaled_past) == 1:
+                    # When there's only one item and data is food-anchored, it's always True
+                    food_intake_row_past = np.ones_like(food_intake_row_scaled_past, dtype=bool)
+                else:
+                    # When we have multiple items, we can use the approach of comparing against min
+                    food_intake_row_past = food_intake_row_scaled_past > food_intake_row_scaled_past.min()
+                
+                if is_food_in_future:
+                    if len(food_intake_row_scaled_future) == 1:
+                        # When there's only one item and data is food-anchored, it's always True
+                        food_intake_row_future = np.ones_like(food_intake_row_scaled_future, dtype=bool)
+                    else:
+                        food_intake_row_future = food_intake_row_scaled_future > food_intake_row_scaled_future.min()
 
                 food_intake_row_indices_past = np.where(food_intake_row_past)[0]
                 if is_food_in_future: food_intake_row_indices_future = np.where(food_intake_row_future)[0]
@@ -935,8 +947,11 @@ class PPGRTemporalFusionTransformer(TemporalFusionTransformer):
                 if is_food_in_future: food_intake_row_indices_future = food_intake_row_indices_future  + 1
                 
                 
-                # Double check to ensure that there is a food intake at relative timestep 0
-                assert 0 in food_intake_row_indices_past, "There should be a food intake at the last timestep of the past indices"
+                try:
+                    # Double check to ensure that there is a food intake at relative timestep 0
+                    assert 0 in food_intake_row_indices_past, "There should be a food intake at the last timestep of the past indices"
+                except Exception as e:
+                    breakpoint()
             
                 # Plot vertical lines for each meal consumption time
                 meal_label_added = False

@@ -1,0 +1,57 @@
+# wandb: Creating sweep from: sweeps/ablation-v1.yaml
+# wandb: Creating sweep with ID: jgckdsnz
+# wandb: View sweep at: https://wandb.ai/mfr-ppgr-2025/tft-ppgr-2025-ablation-v1/sweeps/jgckdsnz
+# wandb: Run sweep agent with: wandb agent mfr-ppgr-2025/tft-ppgr-2025-ablation-v1/jgckdsnz
+
+program: run.py
+command:
+  - ${interpreter}
+  - ${program}
+  - ${args_no_boolean_flags}
+method: grid    
+metric:
+  name: val_eh8_clipped_iauc_l2_corr
+  goal: maximize
+parameters:
+  experiment_name:
+    value: tft-ppgr-2025-ablation-v0
+  random_seed:
+    value: 42
+  dataset_version:
+    value: v0.4
+  wandb_project:
+    value: tft-ppgr-2025-ablation-v0
+  allow_negative_iauc_values:
+    value: true
+  
+  max_encoder_length:
+    values: [1, 4, 8, 32, 48, 96] # equivalent to : 0.25, 1, 2, 8, 12, 24  hours
+  max_prediction_length:
+    values: [8, 16, 24, 32] # equivalent to : 2, 4, 6, 8 hours
+  evaluation_horizon_length:
+    value: 8 # equivalent to 2 hours
+
+  include_food_covariates:
+    values:
+      - true
+      - false
+  include_food_covariates_from_horizon:
+    values:
+      - true
+      - false
+
+  include_user_demographics_covariates:
+    values:
+      - true
+      - false
+
+  scale_target_by_user_id:
+    values:
+      - true
+
+  batch_size:
+    value: 1024
+
+  max_epochs:
+    value: 30
+  

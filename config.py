@@ -20,7 +20,7 @@ class Config:
     allow_negative_iauc_values: bool = True
 
     # Data slicing parameters
-    max_encoder_length: int = 12 * 4  # encoder window length (e.g., 32)
+    max_encoder_length: int = 24 * 4  # encoder window length (e.g., 32)
     max_prediction_length: int = 4 * 4  # prediction horizon (e.g., 8)
     evaluation_horizon_length: int = 2 * 4 # evaluation horizon length (e.g., 2)
 
