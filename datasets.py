@@ -235,7 +235,22 @@ def create_time_series_dataset(
     time_varying_unknown_reals = ["val"]
     
     # Add food covariates to the appropriate location
-    if include_food_covariates:
+    if include_food_covariates:        
+        ### Monkey Patch to remove food_group_cname from food_covariates
+        ## TODO: Fix this properly in data aggregator 
+        all_food_groups = {
+            'vegetables_fruits', 'grains_potatoes_pulses', 'unclassified',
+            'non_alcoholic_beverages', 'dairy_products_meat_fish_eggs_tofu',
+            'sweets_salty_snacks_alcohol', 'oils_fats_nuts'
+        }
+        food_covariates = set(food_covariates)
+        for food_group in all_food_groups:
+            food_group_cname = f"food__{food_group}"
+            if food_group_cname in food_covariates:
+                food_covariates.remove(food_group_cname)        
+        food_covariates = list(food_covariates)
+        ### Food covariates cleaned up
+        
         if include_food_covariates_from_horizon:
             time_varying_known_reals += food_covariates
         else:

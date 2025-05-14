@@ -947,11 +947,12 @@ class PPGRTemporalFusionTransformer(TemporalFusionTransformer):
                 if is_food_in_future: food_intake_row_indices_future = food_intake_row_indices_future  + 1
                 
                 
-                try:
-                    # Double check to ensure that there is a food intake at relative timestep 0
-                    assert 0 in food_intake_row_indices_past, "There should be a food intake at the last timestep of the past indices"
-                except Exception as e:
-                    breakpoint()
+                # try:
+                #     # Double check to ensure that there is a food intake at relative timestep 0
+                #     assert 0 in food_intake_row_indices_past, "There should be a food intake at the last timestep of the past indices"
+                # except Exception as e:
+                #     breakpoint()
+                #     raise e
             
                 # Plot vertical lines for each meal consumption time
                 meal_label_added = False

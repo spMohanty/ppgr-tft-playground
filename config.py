@@ -31,11 +31,11 @@ class Config:
     no_data_cache: bool = False
     
     # Food Covariates    
-    include_food_covariates: bool = True
-    include_food_covariates_from_horizon: bool = True # If True, the food related covariates are "time varying known reals", else they are "time varying unknown reals"
+    include_food_covariates: bool = False
+    include_food_covariates_from_horizon: bool = False # If True, the food related covariates are "time varying known reals", else they are "time varying unknown reals"
     
     # User Demographics Covariates
-    include_user_demographics_covariates: bool = True
+    include_user_demographics_covariates: bool = False
     scale_target_by_user_id: bool = True
 
     # DataLoader parameters
