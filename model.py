@@ -208,6 +208,7 @@ class PPGRTemporalFusionTransformer(TemporalFusionTransformer):
         
         # Positional embeddings
         use_rotary_positional_embeddings: bool = False,
+        causal_attention: bool = True, # Use causal attention for decoder
         
         **kwargs,
     ):
@@ -305,6 +306,58 @@ class PPGRTemporalFusionTransformer(TemporalFusionTransformer):
                 self.hparams.hidden_size, self.hparams.output_size
             )
         
+    def get_attention_mask(
+        self, encoder_lengths: torch.LongTensor, decoder_lengths: torch.LongTensor
+    ):
+        """
+        Returns causal mask to apply for self-attention layer.
+        Critical to ensure that the decoder does not attend to future steps
+        and unknowingly lead to information leakage. 
+        
+        Taken from:
+            https://github.com/sktime/pytorch-forecasting/blob/5685c59f13aaa6aaba7181430272819c11fe7725/pytorch_forecasting/models/temporal_fusion_transformer/_tft.py#L459
+        """
+        decoder_length = decoder_lengths.max()
+        if self.hparams.causal_attention:
+            # indices to which is attended
+            attend_step = torch.arange(decoder_length, device=self.device)
+            # indices for which is predicted
+            predict_step = torch.arange(0, decoder_length, device=self.device)[:, None]
+            # do not attend to steps to self or after prediction
+            decoder_mask = (
+                (attend_step >= predict_step)
+                .unsqueeze(0)
+                .expand(encoder_lengths.size(0), -1, -1)
+            )
+        else:
+            # there is value in attending to future forecasts if
+            # they are made with knowledge currently available
+            #   one possibility is here to use a second attention layer
+            # for future attention
+            # (assuming different effects matter in the future than the past)
+            #  or alternatively using the same layer but
+            # allowing forward attention - i.e. only
+            #  masking out non-available data and self
+            decoder_mask = (
+                create_mask(decoder_length, decoder_lengths)
+                .unsqueeze(1)
+                .expand(-1, decoder_length, -1)
+            )
+        # do not attend to steps where data is padded
+        encoder_mask = (
+            create_mask(encoder_lengths.max(), encoder_lengths)
+            .unsqueeze(1)
+            .expand(-1, decoder_length, -1)
+        )
+        # combine masks along attended time - first encoder and then decoder
+        mask = torch.cat(
+            (
+                encoder_mask,
+                decoder_mask,
+            ),
+            dim=2,
+        )
+        return mask
             
     
     def configure_optimizers(self):
@@ -674,7 +727,7 @@ class PPGRTemporalFusionTransformer(TemporalFusionTransformer):
                 encoder_lengths=encoder_lengths, decoder_lengths=decoder_lengths
             ),
         )
-
+                
         attn_output = self.post_attn_gate_norm(
             attn_output, attn_input[:, max_encoder_length:]
         )
