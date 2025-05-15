@@ -811,28 +811,65 @@ class PPGRTemporalFusionTransformer(TemporalFusionTransformer):
         prediction_kwargs: Optional[Dict[str, Any]] = None,
     ):
         """
-        Plot prediction vs actuals, with a combined attention heatmap aligned
-        on a shared Relative Timestep axis (15 min intervals).
+        Plot prediction vs actuals, with attention heatmap aligned on a shared
+        Relative Timestep axis (15 min intervals), using an embedded custom
+        palette so all settings live inside this function.
         """
-
         import numpy as np
         import seaborn as sns
         from matplotlib import pyplot as plt
+        import matplotlib as mpl
         import matplotlib.gridspec as gridspec
 
-        # --- Style & defaults ---
-        quantiles_kwargs = quantiles_kwargs or {}
-        prediction_kwargs = prediction_kwargs or {}
+        # --- Embedded custom palette and style setup ---
+        CUSTOM_PALETTE = {
+            "historical":  "#2E4057",  # deep slate-blue
+            "observed":    "#CB4335",  # warm brick-red
+            "forecast":    "#2471A3",  # medium blue
+            "uncertainty": "#2471A3",  # light grey
+            "meal":        "#7D3C98",  # muted purple
+            "attention_map": "#2E4057", # deep slate-blue
+        } # D5DBDB
+        mpl.rcParams.update({
+            'font.family':       'serif',
+            'font.serif':        ['Times New Roman', 'Palatino'],
+            'font.size':         10,
+            'axes.titlesize':    12,
+            'axes.labelsize':    11,
+            'xtick.labelsize':   10,
+            'ytick.labelsize':   10,
+            'legend.fontsize':   10,
+            'axes.linewidth':    1.2,
+            'xtick.direction':   'in',
+            'ytick.direction':   'in',
+            'xtick.major.width': 1.0,
+            'ytick.major.width': 1.0,
+        })
         sns.set_style("white")
-        palette          = sns.color_palette("tab10")
-        hist_color       = palette[0]
-        truth_color      = palette[1]
-        forecast_color   = "darkblue"
-        uncertainty_fill = hist_color
-        grid_edge_color  = sns.color_palette("Greys")[2]
-        meal_line_color  = "purple"
+        
+        
+        from matplotlib.colors import LinearSegmentedColormap
 
-        # Unpack inputs & outputs
+        # same CUSTOM_PALETTE and colors list as above
+        custom_cmap = LinearSegmentedColormap.from_list(
+            "ppgr_cmap",      # name
+            ["white", CUSTOM_PALETTE["attention_map"]],
+            N=512                 # resolution of the gradient
+        )
+        
+
+        # Pull colors from our embedded palette
+        hist_color       = CUSTOM_PALETTE["historical"]
+        truth_color      = CUSTOM_PALETTE["observed"]
+        forecast_color   = CUSTOM_PALETTE["forecast"]
+        uncertainty_fill = CUSTOM_PALETTE["uncertainty"]
+        meal_line_color  = CUSTOM_PALETTE["meal"]
+        grid_edge_color  = 'grey'
+
+        # --- Prepare data and unpack tensors ---
+        quantiles_kwargs  = quantiles_kwargs or {}
+        prediction_kwargs = prediction_kwargs or {}
+
         encoder_targets    = to_list(x["encoder_target"])
         decoder_targets    = to_list(x["decoder_target"])
         encoder_continuous = to_list(x["encoder_cont"])
@@ -854,210 +891,181 @@ class PPGRTemporalFusionTransformer(TemporalFusionTransformer):
             encoder_continuous,
             decoder_continuous,
         ):
-            # --- Build full “true” series (historical + actual future) ---
+            # Build true series
             concatenated   = torch.cat([enc_t[idx], dec_t[idx]])
             max_enc_length = x["encoder_lengths"].max()
             true_series    = torch.cat([
                 concatenated[: x["encoder_lengths"][idx]],
                 concatenated[max_enc_length : max_enc_length + x["decoder_lengths"][idx]]
-            ]).detach().cpu().float()  # torch.Tensor on CPU
+            ]).detach().cpu().float()
 
-            # --- Forecast horizon & values ---
+            # Forecast values
             horizon         = x["decoder_lengths"][idx].item()
-            median_values   = median_pred.detach().cpu().float()[idx, :horizon]    # torch.Tensor
-            quantile_values = quantile_pred.detach().cpu().float()[idx, :horizon]  # torch.Tensor
-            raw_values      = raw_pred.detach().cpu().float()[idx, :horizon]       # torch.Tensor
+            median_values   = median_pred.detach().cpu().float()[idx, :horizon]
+            quantile_values = quantile_pred.detach().cpu().float()[idx, :horizon]
+            raw_values      = raw_pred.detach().cpu().float()[idx, :horizon]
 
-            # --- Indices for plotting ---
-            num_historical = len(true_series) - horizon
-            hist_idx       = np.arange(num_historical)
-            fut_idx        = num_historical + np.arange(horizon)
-
-            # --- Relative‐time steps array ---
-            rel_hist = np.arange(-num_historical + 1, 1)   # e.g. [-N+1 … 0]
-            rel_fut  = np.arange(1, horizon + 1)           # e.g. [1 … H]
-            rel_all  = np.concatenate([rel_hist, rel_fut])
-
-            # --- Tick logic: fixed step = 4, center on zero ---
-            tick_step     = 4
-            span          = max(abs(rel_all.min()), rel_all.max())
-            tick_rel      = np.arange(-span, span + 1, tick_step)
-            zero_index    = int(np.where(rel_all == 0)[0][0])
+            # Indices & relative time
+            num_hist = len(true_series) - horizon
+            hist_idx = np.arange(num_hist)
+            fut_idx  = num_hist + np.arange(horizon)
+            rel_all  = np.concatenate([
+                np.arange(-num_hist + 1, 1),
+                np.arange(1, horizon + 1)
+            ])
+            tick_step      = 4
+            span           = max(abs(rel_all.min()), rel_all.max())
+            tick_rel       = np.arange(-span, span + 1, tick_step)
+            zero_index     = int(np.where(rel_all == 0)[0][0])
             tick_positions = zero_index + tick_rel
-            valid         = (tick_positions >= 0) & (tick_positions < len(rel_all))
+            valid          = (tick_positions >= 0) & (tick_positions < len(rel_all))
             tick_positions = tick_positions[valid]
             tick_labels    = tick_rel[valid]
+            last_hist_idx   = num_hist - 1
+            last_hist_val   = true_series[last_hist_idx].item()
 
-            # --- Compute t=0 index & value for bridging lines/bands ---
-            last_hist_idx   = num_historical - 1
-            last_hist_value = true_series[last_hist_idx].item()
-
-            # --- Figure setup ---
+            # Figure & panels
             fig = plt.figure(figsize=(12, 8), constrained_layout=False)
-            gs  = gridspec.GridSpec(2, 1, height_ratios=[3, 1], hspace=0.4, figure=fig)
+            gs  = gridspec.GridSpec(2, 1, height_ratios=[3, 1],
+                                    hspace=0.3, figure=fig)
+            ax_ts  = fig.add_subplot(gs[0])
+            ax_att = fig.add_subplot(gs[1], sharex=ax_ts)
 
-            # ==== TOP subplot: time‐series + forecast ====
-            ax_ts = fig.add_subplot(gs[0])
+            # ==== Top: time-series + forecast + uncertainty ====
+            # Historical
+            ax_ts.plot(
+                hist_idx, true_series[:num_hist],
+                color=hist_color, linewidth=2.0,
+                marker="o", markersize=6,
+                markerfacecolor="white", markeredgecolor=hist_color,
+                label="Historical"
+            )
 
-            # Historical glucose
-            if num_historical > 1:
-                ax_ts.plot(
-                    hist_idx, true_series[:num_historical],
-                    marker="o", markersize=3,
-                    color=hist_color, label="Historical Glucose",
-                    linewidth=1.5
-                )
-            else:
-                ax_ts.scatter(
-                    hist_idx, true_series[:num_historical],
-                    s=30, color=hist_color, label="Historical Glucose"
-                )
-
-            # Ground truth: bridge from last historical point into forecast
+            # Observed future
             if show_future_observed and horizon > 0:
-                ext_truth_idx   = np.concatenate([[last_hist_idx], fut_idx])
-                ext_truth_vals  = np.concatenate([
-                    [last_hist_value],
-                    true_series[num_historical:].numpy()
-                ])
-                if horizon > 1:
-                    ax_ts.plot(
-                        ext_truth_idx, ext_truth_vals,
-                        marker="o", markersize=3,
-                        color=truth_color, label="Ground Truth",
-                        linewidth=1.5
-                    )
-                else:
-                    ax_ts.scatter(
-                        ext_truth_idx, ext_truth_vals,
-                        s=30, color=truth_color, label="Ground Truth"
-                    )
-
-            # Median forecast: bridge from last historical point
-            ext_fore_idx  = np.concatenate([[last_hist_idx], fut_idx])
-            ext_fore_vals = np.concatenate([
-                [last_hist_value],
-                median_values.numpy()
-            ])
-            if horizon > 1:
+                ext_t_idx  = np.concatenate([[last_hist_idx], fut_idx])
+                ext_t_vals = np.concatenate(
+                    [[last_hist_val], true_series[num_hist:].numpy()]
+                )
                 ax_ts.plot(
-                    ext_fore_idx, ext_fore_vals,
-                    marker="o", markersize=3,
-                    color=forecast_color, label="Median Forecast",
-                    linewidth=1.5
-                )
-            else:
-                ax_ts.scatter(
-                    ext_fore_idx, ext_fore_vals,
-                    s=30, color=forecast_color, label="Median Forecast"
+                    ext_t_idx, ext_t_vals,
+                    color=truth_color, linewidth=2.0,
+                    marker="o", markersize=6,
+                    markerfacecolor="white", markeredgecolor=truth_color,
+                    label="Observed"
                 )
 
-            # Quantile bands including the gap from t=0 to t=1
-            num_bands = quantile_values.shape[1]
-            mid_band  = num_bands // 2
-            extended_x = np.concatenate([[last_hist_idx], fut_idx])
-            for band in range(num_bands - 1):
-                lower_curve = torch.min(quantile_values[:, band],
-                                        quantile_values[:, band + 1]).numpy()
-                upper_curve = torch.max(quantile_values[:, band],
-                                        quantile_values[:, band + 1]).numpy()
-                alpha = 0.1 + abs(band - mid_band) * 0.05
+            # Forecast
+            ext_f_idx  = np.concatenate([[last_hist_idx], fut_idx])
+            ext_f_vals = np.concatenate([[last_hist_val],
+                                        median_values.numpy()])
+            ax_ts.plot(
+                ext_f_idx, ext_f_vals,
+                color=forecast_color, linestyle="--", linewidth=2.0,
+                label="Forecast"
+            )
 
-                ext_lower = np.concatenate([[last_hist_value], lower_curve])
-                ext_upper = np.concatenate([[last_hist_value], upper_curve])
-
+            # Uncertainty bands
+            bands = quantile_values.shape[1]
+            mid  = bands // 2
+            for b in range(bands - 1):
+                low  = torch.min(quantile_values[:, b],
+                                quantile_values[:, b + 1]).numpy()
+                high = torch.max(quantile_values[:, b],
+                                quantile_values[:, b + 1]).numpy()
+                alpha = 0.05 + abs(b - mid) * 0.02
+                ext_low  = np.concatenate([[last_hist_val], low])
+                ext_high = np.concatenate([[last_hist_val], high])
                 ax_ts.fill_between(
-                    extended_x,
-                    ext_lower,
-                    ext_upper,
-                    color=uncertainty_fill,
-                    alpha=alpha
+                    ext_f_idx, ext_low, ext_high,
+                    color=uncertainty_fill, alpha=alpha
                 )
 
-            # Meal‐event verticals (unchanged)
+            # Meal events
             meal_key = "food__food_intake_row"
             if meal_key in self.hparams.dataset_parameters.get("scalers", {}):
-                feat_i   = self.hparams.x_reals.index(meal_key)
-                past_ev  = enc_c[idx, :, feat_i].cpu().numpy() > 0
-                fut_ev   = dec_c[idx, :, feat_i].cpu().numpy() > 0 if (
-                                self.hparams.dataset_parameters["time_varying_unknown_reals"]
-                                or self.hparams.dataset_parameters["time_varying_known_reals"]
-                            ) else np.array([])
-                ev_pos   = np.where(past_ev)[0] - num_historical + 1
+                i_feat = self.hparams.x_reals.index(meal_key)
+                past_ev = enc_c[idx, :, i_feat].cpu().numpy() > 0
+                fut_ev  = dec_c[idx, :, i_feat].cpu().numpy() > 0 if (
+                            self.hparams.dataset_parameters["time_varying_unknown_reals"]
+                            or self.hparams.dataset_parameters["time_varying_known_reals"]
+                        ) else np.array([])
+                positions = np.where(past_ev)[0] - num_hist + 1
                 if fut_ev.size:
-                    ev_pos = np.concatenate([ev_pos, np.where(fut_ev)[0] + 1])
+                    positions = np.concatenate([positions, np.where(fut_ev)[0] + 1])
                 drawn = False
-                for e in ev_pos:
-                    xpos = (e - 1 + num_historical) if e > 0 else (e + num_historical - 1)
+                for e in positions:
+                    xpos = (e - 1 + num_hist) if e > 0 else (e + num_hist - 1)
                     ax_ts.axvline(
-                        xpos,
-                        linestyle="--",
+                        xpos, linestyle=":", linewidth=1.2,
                         color=meal_line_color,
-                        label="Meal Consumption" if not drawn else None
+                        label="Meal" if not drawn else None
                     )
                     drawn = True
 
-            # Y‐axis label
-            ax_ts.set_ylabel("Glucose Level (mmol/L)")
-
-            # X‐ticks & t=0 line
+            # Axes & legend
+            ax_ts.set_ylabel("Glucose (mmol/L)")
+            # ax_ts.set_xlabel("Relative Timestep\n(15 min intervals)")
             ax_ts.set_xticks(tick_positions)
-            ax_ts.set_xticklabels(tick_labels, ha="center", rotation=0, fontsize="small")
-            ax_ts.set_xlabel("Relative Timestep (15 min intervals)")
-            ax_ts.axvline(
-                zero_index,
-                linestyle="-",
-                color="black",
-                linewidth=2,
-                label="t = 0"
-            )
+            ax_ts.set_xticklabels(tick_labels, rotation=0)
+            ax_ts.axvline(zero_index, color="black", linewidth=1.2)
+            ax_ts.legend(loc="best", frameon=False)
+            for sp in ["top", "right"]:
+                ax_ts.spines[sp].set_visible(False)
+            ax_ts.spines["left"].set_edgecolor(grid_edge_color)
+            ax_ts.spines["bottom"].set_edgecolor(grid_edge_color)
 
-            # Final styling for top plot
-            ax_ts.grid(False)
-            ax_ts.legend(loc="best", framealpha=0.9, edgecolor=grid_edge_color)
-            for spine in ax_ts.spines.values():
-                spine.set_edgecolor(grid_edge_color)
-                spine.set_linewidth(0.8)
-
-            # Title (with optional loss)
-            title_text = f"Glucose Forecast – #{idx}"
+            # Title with optional loss
+            title = f"Glucose Forecast — #{idx}"
             if add_loss_to_title:
                 if isinstance(add_loss_to_title, torch.Tensor):
-                    loss_val = add_loss_to_title[idx].item()
+                    loss = add_loss_to_title[idx].item()
                 elif isinstance(add_loss_to_title, Metric):
-                    loss_val = add_loss_to_title(
+                    loss = add_loss_to_title(
                         raw_values.unsqueeze(0),
-                        (true_series[num_historical:].unsqueeze(0), None)
+                        (true_series[num_hist:].unsqueeze(0), None)
                     )
                 else:
-                    loss_val = self.loss
-                title_text += f" (Loss: {loss_val:.3f})"
-            ax_ts.set_title(title_text)
+                    loss = self.loss
+                title += f" (Loss: {loss:.3f})"
+            ax_ts.set_title(title)
 
-            # ==== BOTTOM subplot: attention heatmap ====
-            ax_att = fig.add_subplot(gs[1], sharex=ax_ts)
+            # ==== Bottom: attention heatmap (greyscale) ====
             if encoder_attention is not None and decoder_attention is not None:
                 emap = encoder_attention.mean(2)[idx].cpu().numpy()
                 dmap = decoder_attention.mean(2)[idx].cpu().numpy()
-                cmap = np.concatenate([emap, dmap], axis=1)
-                ax_att.imshow(cmap, aspect="auto",
-                            vmin=cmap.min(), vmax=cmap.max())
-                ax_att.set_title("Attention Map")
+                heat = np.concatenate([emap, dmap], axis=1)
+                ax_att.imshow(
+                    heat, aspect='auto', origin='lower',
+                    cmap=custom_cmap
+                )
                 ax_att.set_ylabel("Forecast Step")
-                
-                ytick_step = 4
-                yt = np.arange(0, cmap.shape[0], ytick_step)
+                ax_att.set_xlabel("Relative Timestep\n(15 min intervals)")
+                ax_att.set_xticks(tick_positions)
+                ax_att.set_xticklabels(tick_labels, rotation=0)
+                yt = np.arange(0, heat.shape[0], 4)
                 ax_att.set_yticks(yt)
                 ax_att.set_yticklabels(yt + 1)
+                for sp in ["top", "right"]:
+                    ax_att.spines[sp].set_visible(False)
+                ax_att.spines["left"].set_edgecolor(grid_edge_color)
+                ax_att.spines["bottom"].set_edgecolor(grid_edge_color)
                 
+                #  ───────────────────────────────────────────────────
+                #  Add the corner label using the same font and color
+                #  ───────────────────────────────────────────────────
+                ax_att.text(
+                    0.98, 0.02,                    # x,y in axes coords (bottom‐right)
+                    "Attention Map",               # the label
+                    transform=ax_att.transAxes,    # use axes‐relative coords
+                    ha="right", va="bottom",       # align text corner
+                    fontsize=mpl.rcParams['legend.fontsize'],   # same size as legend
+                    fontfamily=mpl.rcParams['font.family'],     # same family
+                    color=grid_edge_color,                       # reuse your grid/spine color
+                    alpha=0.7                                    # subtle transparency
+                )
 
-                # reuse ticks & labels
-                ax_att.set_xticks(tick_positions)
-                ax_att.set_xticklabels(tick_labels, ha="center", rotation=0, fontsize="small")
-                ax_att.set_xlabel("Relative Timestep (15 min intervals)")
-
-            ax_att.tick_params(labelbottom=True)
-
+            fig.tight_layout()
             figures.append(fig)
 
         return figures[0] if len(figures) == 1 else figures
