@@ -1008,8 +1008,17 @@ class PPGRTemporalFusionTransformer(TemporalFusionTransformer):
             # ax_ts.set_xlabel("Relative Timestep\n(15 min intervals)")
             ax_ts.set_xticks(tick_positions)
             ax_ts.set_xticklabels(tick_labels, rotation=0)
-            ax_ts.axvline(zero_index, color="black", linewidth=1.2)
-            ax_ts.legend(loc="best", frameon=False)
+            ax_ts.axvline(zero_index, color="black", linewidth=1.2, label="t=0")
+            ax_ts.legend(
+                loc="upper left",            # fixed corner
+                frameon=False,               # no box
+                borderaxespad=0.5,           # small padding from the axes
+                handlelength=1.5,            # shorten the little line samples
+                handletextpad=0.5            # tighten the text‐to‐handle spacing
+            )
+                        
+            
+            
             for sp in ["top", "right"]:
                 ax_ts.spines[sp].set_visible(False)
             ax_ts.spines["left"].set_edgecolor(grid_edge_color)
