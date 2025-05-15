@@ -811,270 +811,253 @@ class PPGRTemporalFusionTransformer(TemporalFusionTransformer):
         prediction_kwargs: Optional[Dict[str, Any]] = None,
     ):
         """
-        Plot prediction of prediction vs actuals
+        Plot prediction vs actuals, with a combined attention heatmap aligned
+        on a shared Relative Timestep axis (15 min intervals).
+        """
 
-        Args:
-            x: network input
-            out: network output
-            idx: index of prediction to plot
-            add_loss_to_title: if to add loss to title or loss function to calculate. Can be either metrics,
-                bool indicating if to use loss metric or tensor which contains losses for all samples.
-                Calcualted losses are determined without weights. Default to False.
-            show_future_observed: if to show actuals for future. Defaults to True.
-            ax: matplotlib axes to plot on
-            quantiles_kwargs (Dict[str, Any]): parameters for ``to_quantiles()`` of the loss metric.
-            prediction_kwargs (Dict[str, Any]): parameters for ``to_prediction()`` of the loss metric.
-
-        Returns:
-            matplotlib figure
-        """  # noqa: E501
-        if quantiles_kwargs is None:
-            quantiles_kwargs = {}
-        if prediction_kwargs is None:
-            prediction_kwargs = {}
-
-        from matplotlib import pyplot as plt
+        import numpy as np
         import seaborn as sns
+        from matplotlib import pyplot as plt
+        import matplotlib.gridspec as gridspec
 
-        # Set the seaborn style and palette
-        sns.set_style("white")  # Changed from "whitegrid" to "white"
-        sns.set_palette("tab10")
-        palette = sns.color_palette("tab10")
-        
-        # Get colors from the palette
-        historical_color = palette[0]  # blue
-        ground_truth_color = palette[1]  # orange
-        quantile_fill_color = historical_color 
-        forecast_color = "darkblue" 
-        grid_color = sns.color_palette("Greys")[2]
-        meal_color = "purple"
+        # --- Style & defaults ---
+        quantiles_kwargs = quantiles_kwargs or {}
+        prediction_kwargs = prediction_kwargs or {}
+        sns.set_style("white")
+        palette          = sns.color_palette("tab10")
+        hist_color       = palette[0]
+        truth_color      = palette[1]
+        forecast_color   = "darkblue"
+        uncertainty_fill = hist_color
+        grid_edge_color  = sns.color_palette("Greys")[2]
+        meal_line_color  = "purple"
 
-        # all true values for y of the first sample in batch
-        encoder_targets = to_list(x["encoder_target"])
-        decoder_targets = to_list(x["decoder_target"])
-        
+        # Unpack inputs & outputs
+        encoder_targets    = to_list(x["encoder_target"])
+        decoder_targets    = to_list(x["decoder_target"])
         encoder_continuous = to_list(x["encoder_cont"])
         decoder_continuous = to_list(x["decoder_cont"])
-        
-        
-        
-        food_params_as_unknown_reals = self.hparams.dataset_parameters["time_varying_unknown_reals"]
-        food_params_as_unknown_reals = [param for param in food_params_as_unknown_reals if param.startswith("food__")]
-        
+        raw_predictions    = to_list(out.get("prediction"))
+        median_forecasts   = to_list(self.to_prediction(out, **prediction_kwargs))
+        quantile_forecasts = to_list(self.to_quantiles(out, **quantiles_kwargs))
+        encoder_attention  = out.get("encoder_attention")
+        decoder_attention  = out.get("decoder_attention")
 
-        y_raws = to_list(
-            out["prediction"]
-        )  # raw predictions - used for calculating loss
-        y_hats = to_list(self.to_prediction(out, **prediction_kwargs))
-        y_quantiles = to_list(self.to_quantiles(out, **quantiles_kwargs))
+        figures = []
 
-        # for each target, plot
-        figs = []
-        for y_raw, y_hat, y_quantile, encoder_target, decoder_target, encoder_continuous, decoder_continuous in zip(
-            y_raws, y_hats, y_quantiles, encoder_targets, decoder_targets, encoder_continuous, decoder_continuous
+        for raw_pred, median_pred, quantile_pred, enc_t, dec_t, enc_c, dec_c in zip(
+            raw_predictions,
+            median_forecasts,
+            quantile_forecasts,
+            encoder_targets,
+            decoder_targets,
+            encoder_continuous,
+            decoder_continuous,
         ):
-            y_all = torch.cat([encoder_target[idx], decoder_target[idx]])
-            max_encoder_length = x["encoder_lengths"].max()
-            y = torch.cat(
-                (
-                    y_all[: x["encoder_lengths"][idx]],
-                    y_all[
-                        max_encoder_length : (
-                            max_encoder_length + x["decoder_lengths"][idx]
-                        )
-                    ],
-                ),
+            # --- Build full “true” series (historical + actual future) ---
+            concatenated   = torch.cat([enc_t[idx], dec_t[idx]])
+            max_enc_length = x["encoder_lengths"].max()
+            true_series    = torch.cat([
+                concatenated[: x["encoder_lengths"][idx]],
+                concatenated[max_enc_length : max_enc_length + x["decoder_lengths"][idx]]
+            ]).detach().cpu().float()  # torch.Tensor on CPU
+
+            # --- Forecast horizon & values ---
+            horizon         = x["decoder_lengths"][idx].item()
+            median_values   = median_pred.detach().cpu().float()[idx, :horizon]    # torch.Tensor
+            quantile_values = quantile_pred.detach().cpu().float()[idx, :horizon]  # torch.Tensor
+            raw_values      = raw_pred.detach().cpu().float()[idx, :horizon]       # torch.Tensor
+
+            # --- Indices for plotting ---
+            num_historical = len(true_series) - horizon
+            hist_idx       = np.arange(num_historical)
+            fut_idx        = num_historical + np.arange(horizon)
+
+            # --- Relative‐time steps array ---
+            rel_hist = np.arange(-num_historical + 1, 1)   # e.g. [-N+1 … 0]
+            rel_fut  = np.arange(1, horizon + 1)           # e.g. [1 … H]
+            rel_all  = np.concatenate([rel_hist, rel_fut])
+
+            # --- Tick logic: fixed step = 4, center on zero ---
+            tick_step     = 4
+            span          = max(abs(rel_all.min()), rel_all.max())
+            tick_rel      = np.arange(-span, span + 1, tick_step)
+            zero_index    = int(np.where(rel_all == 0)[0][0])
+            tick_positions = zero_index + tick_rel
+            valid         = (tick_positions >= 0) & (tick_positions < len(rel_all))
+            tick_positions = tick_positions[valid]
+            tick_labels    = tick_rel[valid]
+
+            # --- Compute t=0 index & value for bridging lines/bands ---
+            last_hist_idx   = num_historical - 1
+            last_hist_value = true_series[last_hist_idx].item()
+
+            # --- Figure setup ---
+            fig = plt.figure(figsize=(12, 8), constrained_layout=False)
+            gs  = gridspec.GridSpec(2, 1, height_ratios=[3, 1], hspace=0.4, figure=fig)
+
+            # ==== TOP subplot: time‐series + forecast ====
+            ax_ts = fig.add_subplot(gs[0])
+
+            # Historical glucose
+            if num_historical > 1:
+                ax_ts.plot(
+                    hist_idx, true_series[:num_historical],
+                    marker="o", markersize=3,
+                    color=hist_color, label="Historical Glucose",
+                    linewidth=1.5
+                )
+            else:
+                ax_ts.scatter(
+                    hist_idx, true_series[:num_historical],
+                    s=30, color=hist_color, label="Historical Glucose"
+                )
+
+            # Ground truth: bridge from last historical point into forecast
+            if show_future_observed and horizon > 0:
+                ext_truth_idx   = np.concatenate([[last_hist_idx], fut_idx])
+                ext_truth_vals  = np.concatenate([
+                    [last_hist_value],
+                    true_series[num_historical:].numpy()
+                ])
+                if horizon > 1:
+                    ax_ts.plot(
+                        ext_truth_idx, ext_truth_vals,
+                        marker="o", markersize=3,
+                        color=truth_color, label="Ground Truth",
+                        linewidth=1.5
+                    )
+                else:
+                    ax_ts.scatter(
+                        ext_truth_idx, ext_truth_vals,
+                        s=30, color=truth_color, label="Ground Truth"
+                    )
+
+            # Median forecast: bridge from last historical point
+            ext_fore_idx  = np.concatenate([[last_hist_idx], fut_idx])
+            ext_fore_vals = np.concatenate([
+                [last_hist_value],
+                median_values.numpy()
+            ])
+            if horizon > 1:
+                ax_ts.plot(
+                    ext_fore_idx, ext_fore_vals,
+                    marker="o", markersize=3,
+                    color=forecast_color, label="Median Forecast",
+                    linewidth=1.5
+                )
+            else:
+                ax_ts.scatter(
+                    ext_fore_idx, ext_fore_vals,
+                    s=30, color=forecast_color, label="Median Forecast"
+                )
+
+            # Quantile bands including the gap from t=0 to t=1
+            num_bands = quantile_values.shape[1]
+            mid_band  = num_bands // 2
+            extended_x = np.concatenate([[last_hist_idx], fut_idx])
+            for band in range(num_bands - 1):
+                lower_curve = torch.min(quantile_values[:, band],
+                                        quantile_values[:, band + 1]).numpy()
+                upper_curve = torch.max(quantile_values[:, band],
+                                        quantile_values[:, band + 1]).numpy()
+                alpha = 0.1 + abs(band - mid_band) * 0.05
+
+                ext_lower = np.concatenate([[last_hist_value], lower_curve])
+                ext_upper = np.concatenate([[last_hist_value], upper_curve])
+
+                ax_ts.fill_between(
+                    extended_x,
+                    ext_lower,
+                    ext_upper,
+                    color=uncertainty_fill,
+                    alpha=alpha
+                )
+
+            # Meal‐event verticals (unchanged)
+            meal_key = "food__food_intake_row"
+            if meal_key in self.hparams.dataset_parameters.get("scalers", {}):
+                feat_i   = self.hparams.x_reals.index(meal_key)
+                past_ev  = enc_c[idx, :, feat_i].cpu().numpy() > 0
+                fut_ev   = dec_c[idx, :, feat_i].cpu().numpy() > 0 if (
+                                self.hparams.dataset_parameters["time_varying_unknown_reals"]
+                                or self.hparams.dataset_parameters["time_varying_known_reals"]
+                            ) else np.array([])
+                ev_pos   = np.where(past_ev)[0] - num_historical + 1
+                if fut_ev.size:
+                    ev_pos = np.concatenate([ev_pos, np.where(fut_ev)[0] + 1])
+                drawn = False
+                for e in ev_pos:
+                    xpos = (e - 1 + num_historical) if e > 0 else (e + num_historical - 1)
+                    ax_ts.axvline(
+                        xpos,
+                        linestyle="--",
+                        color=meal_line_color,
+                        label="Meal Consumption" if not drawn else None
+                    )
+                    drawn = True
+
+            # Y‐axis label
+            ax_ts.set_ylabel("Glucose Level (mmol/L)")
+
+            # X‐ticks & t=0 line
+            ax_ts.set_xticks(tick_positions)
+            ax_ts.set_xticklabels(tick_labels, ha="center", rotation=0, fontsize="small")
+            ax_ts.set_xlabel("Relative Timestep (15 min intervals)")
+            ax_ts.axvline(
+                zero_index,
+                linestyle="-",
+                color="black",
+                linewidth=2,
+                label="t = 0"
             )
-            # move predictions to cpu
-            y_hat = y_hat.detach().cpu().to(torch.float32)[idx, : x["decoder_lengths"][idx]]
-            y_quantile = y_quantile.detach().cpu().to(torch.float32)[idx, : x["decoder_lengths"][idx]]
-            y_raw = y_raw.detach().cpu().to(torch.float32)[idx, : x["decoder_lengths"][idx]]
 
-            # move to cpu
-            y = y.detach().cpu().to(torch.float32)
-            
-            # create figure
-            if ax is None:
-                fig, ax = plt.subplots(figsize=(10, 6))
-            else:
-                fig = ax.get_figure()
-                
-            n_pred = y_hat.shape[0]
-            
-            # Create time indices for both history and forecast
-            T_context = y.shape[0] - n_pred
-            T_forecast = n_pred
-            x_hist = list(range(-T_context + 1, 1))
-            x_pred = list(range(1, T_forecast + 1))
-            
-            # Plot historical glucose - check if we need scatter or plot
-            if len(x_hist) > 1:
-                ax.plot(x_hist, y[:-n_pred], marker="o", markersize=3, 
-                       label="Historical Glucose", color=historical_color, linewidth=1.5)
-            else:
-                ax.scatter(x_hist, y[:-n_pred], marker="o", s=30, 
-                          label="Historical Glucose", color=historical_color)
-            
-            # Plot ground truth (if requested)
-            if show_future_observed:
-                if len(x_pred) > 1:
-                    ax.plot(x_pred, y[-n_pred:], marker="o", markersize=3,
-                           label="Ground Truth", color=ground_truth_color, linewidth=1.5)
-                else:
-                    ax.scatter(x_pred, y[-n_pred:], marker="o", s=30,
-                              label="Ground Truth", color=ground_truth_color)
-            
-            # Plot median forecast
-            median_index = y_quantile.shape[1] // 2
-            if len(x_pred) > 1:
-                ax.plot(x_pred, y_hat, marker="o", markersize=3, 
-                       label="Median Forecast", color=forecast_color, linewidth=1.5)
-            else:
-                ax.scatter(x_pred, y_hat, marker="o", s=30, 
-                          label="Median Forecast", color=forecast_color)
-            
-            # Plot quantile intervals with gradient opacity, similar to plot_forecast_examples
-            # The median_index is the middle point (e.g., 4 if there are 9 quantiles)
-            for qi in range(y_quantile.shape[1] - 1):
-                # Calculate alpha based on distance from median, matching plot_forecast_examples approach
-                alpha_val = 0.1 + (abs(qi - median_index)) * 0.05
-                
-                # Get lower and upper bounds (ensuring they're in correct order)
-                q_lower = torch.minimum(y_quantile[:, qi], y_quantile[:, qi+1])
-                q_upper = torch.maximum(y_quantile[:, qi], y_quantile[:, qi+1])
-                
-                if len(x_pred) > 1:
-                    ax.fill_between(
-                        x_pred,
-                        q_lower,
-                        q_upper,
-                        color=quantile_fill_color,
-                        alpha=alpha_val
-                    )
-                else:
-                    # Handle single point case
-                    quantiles = torch.tensor(
-                        [[y_quantile[0, qi]], [y_quantile[0, qi+1]]]
-                    )
-                    ax.errorbar(
-                        x_pred,
-                        y[[-n_pred]],
-                        yerr=quantiles - y[-n_pred],
-                        color=quantile_fill_color,
-                        capsize=1.0,
-                    )
-
-            # Add food consumption lines
-            food_key = "food__food_intake_row"
-            if food_key in self.hparams.dataset_parameters["scalers"].keys():
-                food_intake_row_scaler = self.hparams.dataset_parameters["scalers"][food_key]
-                is_food_in_future = len(food_params_as_unknown_reals) > 0
-                
-                index_food_eaten = self.hparams.x_reals.index(food_key)
-                
-                # Get unscaled values 
-                food_intake_row_scaled_past = encoder_continuous[idx, :, index_food_eaten].detach().cpu().numpy()
-                if is_food_in_future: food_intake_row_scaled_future  = decoder_continuous[idx, :, index_food_eaten].detach().cpu().numpy()
-
-                # Better approach to detect boolean values in scaled data
-                # First check if we only have a single item or multiple items
-                if len(food_intake_row_scaled_past) == 1:
-                    # When there's only one item and data is food-anchored, it's always True
-                    food_intake_row_past = np.ones_like(food_intake_row_scaled_past, dtype=bool)
-                else:
-                    # When we have multiple items, we can use the approach of comparing against min
-                    food_intake_row_past = food_intake_row_scaled_past > food_intake_row_scaled_past.min()
-                
-                if is_food_in_future:
-                    if len(food_intake_row_scaled_future) == 1:
-                        # When there's only one item and data is food-anchored, it's always True
-                        food_intake_row_future = np.ones_like(food_intake_row_scaled_future, dtype=bool)
-                    else:
-                        food_intake_row_future = food_intake_row_scaled_future > food_intake_row_scaled_future.min()
-
-                food_intake_row_indices_past = np.where(food_intake_row_past)[0]
-                if is_food_in_future: food_intake_row_indices_future = np.where(food_intake_row_future)[0]
-                
-                # update indices to the relative timesteps
-                food_intake_row_indices_past = food_intake_row_indices_past - T_context + 1
-                if is_food_in_future: food_intake_row_indices_future = food_intake_row_indices_future  + 1
-                
-                
-                # try:
-                #     # Double check to ensure that there is a food intake at relative timestep 0
-                #     assert 0 in food_intake_row_indices_past, "There should be a food intake at the last timestep of the past indices"
-                # except Exception as e:
-                #     breakpoint()
-                #     raise e
-            
-                # Plot vertical lines for each meal consumption time
-                meal_label_added = False
-                
-                meal_consumption_indices = food_intake_row_indices_past
-                
-                if is_food_in_future:
-                    meal_consumption_indices = np.concatenate([food_intake_row_indices_past, food_intake_row_indices_future])
-                
-                for idx in meal_consumption_indices:
-                    ax.axvline(x=idx, color=meal_color, linestyle="--", alpha=0.7, 
-                              label="Meal Consumption" if not meal_label_added else None)
-                    meal_label_added = True
-                                
-    
-            if add_loss_to_title is not False:
-                if isinstance(add_loss_to_title, bool):
-                    loss = self.loss
-                elif isinstance(add_loss_to_title, torch.Tensor):
-                    loss = add_loss_to_title.detach()[idx].item()
-                elif isinstance(add_loss_to_title, Metric):
-                    loss = add_loss_to_title
-                else:
-                    raise ValueError(
-                        f"add_loss_to_title '{add_loss_to_title}'' is unknown"
-                    )
-                if isinstance(loss, MASE):
-                    loss_value = loss(
-                        y_raw[None], (y[-n_pred:][None], None), y[:n_pred][None]
-                    )
-                elif isinstance(loss, Metric):
-                    try:
-                        loss_value = loss(y_raw[None], (y[-n_pred:][None], None))
-                    except Exception:
-                        loss_value = "-"
-                else:
-                    loss_value = loss
-                ax.set_title(f"Glucose Forecast - #{idx} (Loss: {loss_value})", fontsize=13, fontweight='bold')
-            else:
-                ax.set_title(f"Glucose Forecast - #{idx}", fontsize=13, fontweight='bold')
-                
-            # Add proper labels
-            ax.set_xlabel("Relative Timestep", fontsize=11)
-            ax.set_ylabel("Glucose Level (mmol/L)", fontsize=11)
-            
-            # Remove grid lines - we're using a clean white background now
-            ax.grid(False)
-            
-            # Add a vertical line at t=0 to mark the forecast start
-            # ax.axvline(x=0, color=palette[4], linestyle='--', alpha=0.7, linewidth=1.5)
-            
-            # Improve legend
-            ax.legend(loc="best", fontsize=10, framealpha=0.9, edgecolor=grid_color)
-            
-            # Use pure white background
-            ax.set_facecolor('white')
-            
-            # Add subtle spines
-            for spine in ax.spines.values():
-                spine.set_edgecolor(grid_color)
+            # Final styling for top plot
+            ax_ts.grid(False)
+            ax_ts.legend(loc="best", framealpha=0.9, edgecolor=grid_edge_color)
+            for spine in ax_ts.spines.values():
+                spine.set_edgecolor(grid_edge_color)
                 spine.set_linewidth(0.8)
-            
-            # Adjust layout
-            fig.tight_layout()
-            
-            figs.append(fig)
 
-        # return multiple of target is a list, otherwise return single figure
-        if isinstance(x["encoder_target"], (tuple, list)):
-            return figs
-        else:
-            return fig
+            # Title (with optional loss)
+            title_text = f"Glucose Forecast – #{idx}"
+            if add_loss_to_title:
+                if isinstance(add_loss_to_title, torch.Tensor):
+                    loss_val = add_loss_to_title[idx].item()
+                elif isinstance(add_loss_to_title, Metric):
+                    loss_val = add_loss_to_title(
+                        raw_values.unsqueeze(0),
+                        (true_series[num_historical:].unsqueeze(0), None)
+                    )
+                else:
+                    loss_val = self.loss
+                title_text += f" (Loss: {loss_val:.3f})"
+            ax_ts.set_title(title_text)
+
+            # ==== BOTTOM subplot: attention heatmap ====
+            ax_att = fig.add_subplot(gs[1], sharex=ax_ts)
+            if encoder_attention is not None and decoder_attention is not None:
+                emap = encoder_attention.mean(2)[idx].cpu().numpy()
+                dmap = decoder_attention.mean(2)[idx].cpu().numpy()
+                cmap = np.concatenate([emap, dmap], axis=1)
+                ax_att.imshow(cmap, aspect="auto",
+                            vmin=cmap.min(), vmax=cmap.max())
+                ax_att.set_title("Attention Map")
+                ax_att.set_ylabel("Forecast Step")
+                
+                ytick_step = 4
+                yt = np.arange(0, cmap.shape[0], ytick_step)
+                ax_att.set_yticks(yt)
+                ax_att.set_yticklabels(yt + 1)
+                
+
+                # reuse ticks & labels
+                ax_att.set_xticks(tick_positions)
+                ax_att.set_xticklabels(tick_labels, ha="center", rotation=0, fontsize="small")
+                ax_att.set_xlabel("Relative Timestep (15 min intervals)")
+
+            ax_att.tick_params(labelbottom=True)
+
+            figures.append(fig)
+
+        return figures[0] if len(figures) == 1 else figures
