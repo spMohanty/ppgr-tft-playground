@@ -207,7 +207,7 @@ class PPGRTemporalFusionTransformer(TemporalFusionTransformer):
         enforce_quantile_monotonicity: bool = False,
         
         # Positional embeddings
-        use_rotary_positional_embeddings: bool = False,
+        use_rotary_positional_embeddings: bool = True,
         causal_attention: bool = True, # Use causal attention for decoder
         
         **kwargs,
@@ -229,7 +229,7 @@ class PPGRTemporalFusionTransformer(TemporalFusionTransformer):
         self.use_rotary_positional_embeddings = use_rotary_positional_embeddings
         if self.use_rotary_positional_embeddings:
             logger.info("Initializing rotary positional embeddings")
-            total_range = max_encoder_length + 100  # a safe upper bound
+            total_range = max_encoder_length + 1000  # a safe upper bound
             self.positional_embeddings = RotaryPositionalEmbeddings(
                 dim=hidden_size,
                 base=10000,
@@ -646,7 +646,7 @@ class PPGRTemporalFusionTransformer(TemporalFusionTransformer):
             # Apply centering to indices
             past_indices = past_indices - centered_offset
             future_indices = future_indices - centered_offset
-            
+                        
             # Apply rotary positional embeddings
             embeddings_varying_encoder = self.positional_embeddings(
                 embeddings_varying_encoder, past_indices

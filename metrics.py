@@ -9,6 +9,13 @@ import lightning.pytorch as pl
 from torchmetrics.regression import PearsonCorrCoef
 from typing import Any, Dict, Tuple
 
+from torchmetrics.functional.regression import (
+    mean_squared_error,
+    mean_absolute_error,
+    mean_absolute_percentage_error,
+    symmetric_mean_absolute_percentage_error,
+)
+
 # -----------------------------------------------------------------------------
 # Helper Functions for Metrics
 # -----------------------------------------------------------------------------
@@ -392,6 +399,24 @@ class PPGRMetricsCallback(pl.Callback):
             for key, value in corr_dict.items()
         }
         all_metrics_data.update(metric_correlations)
+        
+        
+        # Calculate the standard RMSE, MAE, and MAPE, SMAPE for evaluation horizon
+        all_preds_flat = all_preds.flatten()
+        all_targets_flat = all_targets.flatten()
+        rmse = mean_squared_error(all_preds_flat, all_targets_flat, squared=False)
+        mae = mean_absolute_error(all_preds_flat, all_targets_flat)
+        mape = mean_absolute_percentage_error(all_preds_flat, all_targets_flat)
+        smape = symmetric_mean_absolute_percentage_error(all_preds_flat, all_targets_flat)
+        
+        metric_timeseries = {
+            f"{logger_prefix}_rmse": rmse,
+            f"{logger_prefix}_mae": mae,
+            f"{logger_prefix}_mape": mape,
+            f"{logger_prefix}_smape": smape
+        }
+        all_metrics_data.update(metric_timeseries)
+        
 
         if plot:
             # Create and log scatter plots for each metric type
@@ -411,6 +436,10 @@ class PPGRMetricsCallback(pl.Callback):
             for key, value in metric_correlations.items():
                 pl_module.log(key, value, prog_bar=True, sync_dist=True)
                 
+            # Log all time series metrics
+            for key, value in metric_timeseries.items():
+                pl_module.log(key, value, prog_bar=True, sync_dist=True)
+    
             # log all monotonicity violation metrics
             for key, value in metric_monotonicity_violations.items():
                 pl_module.log(key, value, prog_bar=True, sync_dist=True)
