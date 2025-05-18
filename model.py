@@ -593,6 +593,8 @@ class PPGRTemporalFusionTransformer(TemporalFusionTransformer):
         static_context_variable_selection = self.expand_static_context(
             self.static_context_variable_selection(static_embedding), timesteps
         )
+        
+        breakpoint()
 
         # encoder variable selection
         embeddings_varying_encoder = {
@@ -824,11 +826,6 @@ class PPGRTemporalFusionTransformer(TemporalFusionTransformer):
             self.to_quantiles(outputs)[index, :fut_h]
             .detach().cpu().float().numpy()
         )
-        raw = outputs.get("prediction")
-        raw_forecast = (
-            raw[index, :fut_h].detach().cpu().float().numpy()
-            if raw is not None else None
-        )
 
         # 2) meal flags
         meal_feature_key = "food__food_intake_row"
@@ -867,7 +864,6 @@ class PPGRTemporalFusionTransformer(TemporalFusionTransformer):
             true_future=true_future if show_future_observed else None,
             median_forecast=med,
             quantile_forecasts=quants,
-            raw_forecast=raw_forecast,
             encoder_attention_map=encoder_attention_map,
             decoder_attention_map=decoder_attention_map,
             meal_flags=meal_flags,
