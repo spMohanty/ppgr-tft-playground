@@ -236,6 +236,9 @@ class PPGRTemporalFusionTransformer(TemporalFusionTransformer):
                 offset=max_encoder_length  # Center positions around the last valid position
             )
         
+        # Debug line - to be removed         
+        self.blacklisted_variables  = ["relative_time_idx", "time_idx"]
+
         logger.info("Setting up variable selection networks")
         self.setup_variable_selection_networks()
         
@@ -473,27 +476,27 @@ class PPGRTemporalFusionTransformer(TemporalFusionTransformer):
         # variable selection for encoder and decoder
         encoder_input_sizes = {
             name: self.input_embeddings.output_size[name]
-            for name in self.hparams.time_varying_categoricals_encoder
+            for name in self.hparams.time_varying_categoricals_encoder if name not in self.blacklisted_variables
         }
         encoder_input_sizes.update(
             {
                 name: self.hparams.hidden_continuous_sizes.get(
                     name, self.hparams.hidden_continuous_size
                 )
-                for name in self.hparams.time_varying_reals_encoder
+                for name in self.hparams.time_varying_reals_encoder if name not in self.blacklisted_variables
             }
         )
 
         decoder_input_sizes = {
             name: self.input_embeddings.output_size[name]
-            for name in self.hparams.time_varying_categoricals_decoder
+            for name in self.hparams.time_varying_categoricals_decoder if name not in self.blacklisted_variables
         }
         decoder_input_sizes.update(
             {
                 name: self.hparams.hidden_continuous_sizes.get(
                     name, self.hparams.hidden_continuous_size
                 )
-                for name in self.hparams.time_varying_reals_decoder
+                for name in self.hparams.time_varying_reals_decoder if name not in self.blacklisted_variables
             }
         )
 
@@ -574,11 +577,11 @@ class PPGRTemporalFusionTransformer(TemporalFusionTransformer):
 
         # static variable selection
         if len(self.static_variables) > 0:
-            static_embedding = {
+            static_embedding_variables = {
                 name: input_vectors[name][:, 0] for name in self.static_variables
             }
             static_embedding, static_variable_selection = self.static_variable_selection(
-                static_embedding
+                static_embedding_variables
             )
         else:
             static_embedding = torch.zeros(
@@ -593,13 +596,11 @@ class PPGRTemporalFusionTransformer(TemporalFusionTransformer):
         static_context_variable_selection = self.expand_static_context(
             self.static_context_variable_selection(static_embedding), timesteps
         )
-        
-        breakpoint()
 
         # encoder variable selection
         embeddings_varying_encoder = {
             name: input_vectors[name][:, :max_encoder_length]
-            for name in self.encoder_variables
+            for name in self.encoder_variables if name not in self.blacklisted_variables
         }
         embeddings_varying_encoder, encoder_sparse_weights = (
             self.encoder_variable_selection(
@@ -615,7 +616,7 @@ class PPGRTemporalFusionTransformer(TemporalFusionTransformer):
         # decoder variable selection
         embeddings_varying_decoder = {
             name: input_vectors[name][:, max_encoder_length:]
-            for name in self.decoder_variables
+            for name in self.decoder_variables if name not in self.blacklisted_variables       
         }
         embeddings_varying_decoder, decoder_sparse_weights = (
             self.decoder_variable_selection(
@@ -698,7 +699,7 @@ class PPGRTemporalFusionTransformer(TemporalFusionTransformer):
             memory_key_padding_mask=encoder_padding_mask,  # B x T_enc
         )  # -> B x T_dec x hidden
 
-
+        
         # Add post transformer gating
         transformer_output_encoder = self.post_transformer_gate_encoder(transformer_encoder_output)
         transformer_output_encoder = self.post_transformer_add_norm_encoder(
@@ -729,7 +730,7 @@ class PPGRTemporalFusionTransformer(TemporalFusionTransformer):
                 encoder_lengths=encoder_lengths, decoder_lengths=decoder_lengths
             ),
         )
-                
+    
         attn_output = self.post_attn_gate_norm(
             attn_output, attn_input[:, max_encoder_length:]
         )
@@ -737,6 +738,7 @@ class PPGRTemporalFusionTransformer(TemporalFusionTransformer):
         output = self.pre_output_gate_norm(
             output, transformer_output[:, max_encoder_length:]
         )
+        
         
         # Ensure the final output layer always runs in full precision
         with torch.amp.autocast("cuda", enabled=False):

@@ -2,7 +2,7 @@ from dataclasses import dataclass, asdict
 from rich import print as rprint
 from rich.pretty import pprint
 
-from typing import Tuple, Any
+from typing import Tuple, Any, List
 
 @dataclass
 class Config:
@@ -10,7 +10,7 @@ class Config:
     experiment_name: str = "tft-ppgr-2025-fo"
     random_seed: int = 42
     dataset_version: str = "v0.4"
-    debug_mode: bool = False
+    debug: bool = False
 
     # WandB configuration
     wandb_project: str = "tft-ppgr-2025-debug"

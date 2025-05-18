@@ -118,7 +118,7 @@ def main(**kwargs):
     wandb_logger = initialize_wandb(config, experiment_name)
 
     # In debug mode, run only one epoch.
-    if config.debug_mode:
+    if config.debug:
         config.max_epochs = 1
         # config.include_food_covariates = True
         # config.include_food_covariates_from_horizon = False

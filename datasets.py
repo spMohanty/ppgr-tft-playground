@@ -46,7 +46,7 @@ def get_cache_params(config: Any) -> dict:
     """Extract the parameters from the config that affect dataset/dataloader creation."""
     return {
         "dataset_version": config.dataset_version,
-        "debug_mode": config.debug_mode,
+        "debug": config.debug,
         "max_encoder_length": config.max_encoder_length,
         "max_prediction_length": config.max_prediction_length,
         "validation_percentage": config.validation_percentage,
@@ -80,11 +80,11 @@ def get_cache_file_paths(
 # =============================================================================
 # Data Loading and Preprocessing Functions
 # =============================================================================
-def load_dataframe(dataset_version: str, debug_mode: bool) -> pd.DataFrame:
+def load_dataframe(dataset_version: str, debug: bool) -> pd.DataFrame:
     """
     Load the processed CSV file into a DataFrame and sort by user, block, and time.
     """
-    if debug_mode:
+    if debug:
         PREFIX = "debug-"
         SUBDIR = "debug/"
     else:
@@ -360,7 +360,7 @@ def get_cached_time_series_datasets(
         test_dataset = torch.load(paths["test"], weights_only=False)
     else:
         logger.info(f"Cache not found for hash {cache_hash}. Preparing datasets...")
-        df, users_demographics_df = load_dataframe(config.dataset_version, config.debug_mode)
+        df, users_demographics_df = load_dataframe(config.dataset_version, config.debug)
         train_df, val_df, test_df = prepare_time_series_slices(
             df,
             config.max_encoder_length,
@@ -546,7 +546,7 @@ if __name__ == "__main__":
     # check config.py for details
     config = Config()
     
-    config.debug_mode = True
+    config.debug = True
 
     print("=== Testing Cached Time Series DataLoaders ===")
     
