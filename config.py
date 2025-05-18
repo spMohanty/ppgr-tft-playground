@@ -36,7 +36,7 @@ class Config:
     
     # User Demographics Covariates
     include_user_demographics_covariates: bool = False
-    scale_target_by_user_id: bool = True
+    scale_target_by_user_id: bool = False
 
     # DataLoader parameters
     batch_size: int = 256 * 4

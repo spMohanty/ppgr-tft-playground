@@ -52,6 +52,7 @@ def get_cache_params(config: Any) -> dict:
         "validation_percentage": config.validation_percentage,
         "test_percentage": config.test_percentage,
         
+        "scale_target_by_user_id": config.scale_target_by_user_id,
         "include_food_covariates": config.include_food_covariates,
         "include_food_covariates_from_horizon": config.include_food_covariates_from_horizon,
         "include_user_demographics_covariates": config.include_user_demographics_covariates,
