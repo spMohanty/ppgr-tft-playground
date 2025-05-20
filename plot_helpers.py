@@ -149,14 +149,14 @@ def plot_forecast(
     if encoder_attention_map is not None:
         # Create grid with extra column for colorbar
         gs = gridspec.GridSpec(nrows, ncols, height_ratios=height_ratios, width_ratios=width_ratios,
-                               hspace=0.3, wspace=0.02, figure=fig)
+                               hspace=0.08, wspace=0.02, figure=fig)
         ax_ts = fig.add_subplot(gs[0, 0])  # Time series in top-left
         ax_at = fig.add_subplot(gs[1, 0], sharex=ax_ts)  # Attention map in bottom-left
         cax = fig.add_subplot(gs[1, 1])  # Colorbar in bottom-right
     else:
         # Original layout when there's no attention map
         gs = gridspec.GridSpec(nrows, 1, height_ratios=height_ratios,
-                               hspace=0.3, figure=fig)
+                               hspace=0.05, figure=fig)
         ax_ts = fig.add_subplot(gs[0])
         ax_at = None
         cax = None
@@ -232,16 +232,15 @@ def plot_forecast(
     for spine in ["top", "right"]:
         ax_ts.spines[spine].set_visible(False)
 
-    # — title with optional loss —
-    title = "Glucose Forecast" 
-    if loss_value is not None:
-        title += f" (Loss: {loss_value:.4f})"
+    # # — title with optional loss —
+    # title = "Glucose Forecast" 
+    # if loss_value is not None:
+    #     title += f" (Loss: {loss_value:.4f})"
         
-    # Add the title with our new formatting
-    ax_ts.set_title(title, fontsize=14)
+    # # Add the title with our new formatting
+    # ax_ts.set_title(title, fontsize=14)
     
     # Add better labels
-    ax_ts.set_xlabel("Time (15-min intervals)", fontsize=12)
     ax_ts.set_ylabel("Glucose (mmol/L)", fontsize=12)
     
     # — attention heatmap —
@@ -252,6 +251,9 @@ def plot_forecast(
         else:
             attention_map = encoder_attention_map
             
+        # Reduce space between plots
+        fig.subplots_adjust(hspace=0.00)
+        
         # Plot the attention map
         im = ax_at.imshow(attention_map, aspect="auto", origin="lower", cmap=attention_cmap)
         ax_at.set_ylabel("Forecast Step")
@@ -306,7 +308,7 @@ if __name__ == "__main__":
     decoder_attention_map[np.triu_indices(F, k=1)] = 0
 
     # 2) plot
-    fig = plot_helpers.plot_forecast(
+    figs = plot_helpers.plot_forecast(
         true_history=hist,
         true_future=fut,
         median_forecast=med,

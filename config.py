@@ -9,7 +9,7 @@ class Config:
     # General configuration
     experiment_name: str = "tft-ppgr-2025-fo"
     random_seed: int = 42
-    dataset_version: str = "v0.4"
+    dataset_version: str = "v0.5"
     debug: bool = False
 
     # WandB configuration
@@ -23,6 +23,7 @@ class Config:
     max_encoder_length: int = 12 * 4  # encoder window length (e.g., 32)
     max_prediction_length: int = 4 * 4  # prediction horizon (e.g., 8)
     evaluation_horizon_length: int = 2 * 4 # evaluation horizon length (e.g., 2)
+    add_relative_time_idx: bool = False # If True, the relative time index is added to the input features
 
     
     validation_percentage: float = 0.1

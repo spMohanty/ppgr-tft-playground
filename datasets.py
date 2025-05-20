@@ -53,6 +53,7 @@ def get_cache_params(config: Any) -> dict:
         "test_percentage": config.test_percentage,
         
         "scale_target_by_user_id": config.scale_target_by_user_id,
+        "add_relative_time_idx": config.add_relative_time_idx,
         "include_food_covariates": config.include_food_covariates,
         "include_food_covariates_from_horizon": config.include_food_covariates_from_horizon,
         "include_user_demographics_covariates": config.include_user_demographics_covariates,
@@ -223,6 +224,7 @@ def create_time_series_dataset(
     include_user_demographics_covariates: bool = True,
     
     scale_target_by_user_id: bool = True,
+    add_relative_time_idx: bool = True,
 
     training_dataset_parameters: Dict[str, Any] = None,
 ) -> TimeSeriesDataSet:
@@ -318,7 +320,7 @@ def create_time_series_dataset(
         time_varying_known_reals=time_varying_known_reals,
         time_varying_unknown_categoricals=[],
         time_varying_unknown_reals=time_varying_unknown_reals,
-        add_relative_time_idx=True,
+        add_relative_time_idx=add_relative_time_idx,
         add_target_scales=False,
         add_encoder_length=False,
         target_normalizer=target_normalizer,
@@ -409,6 +411,7 @@ def get_cached_time_series_datasets(
             include_user_demographics_covariates=config.include_user_demographics_covariates,
             
             scale_target_by_user_id=config.scale_target_by_user_id,
+            add_relative_time_idx=config.add_relative_time_idx,
         )
         
         ### NOTE: We monkey path pytorch-forecasting manually to ensure that
@@ -442,7 +445,9 @@ def get_cached_time_series_datasets(
             include_food_covariates_from_horizon=config.include_food_covariates_from_horizon,
             include_user_demographics_covariates=config.include_user_demographics_covariates,
             
-            training_dataset_parameters=training_dataset_parameters            
+            add_relative_time_idx=config.add_relative_time_idx,
+            
+            training_dataset_parameters=training_dataset_parameters       
         )
         
         test_dataset = create_time_series_dataset(
@@ -455,6 +460,8 @@ def get_cached_time_series_datasets(
             include_food_covariates=config.include_food_covariates,
             include_food_covariates_from_horizon=config.include_food_covariates_from_horizon,
             include_user_demographics_covariates=config.include_user_demographics_covariates,
+            
+            add_relative_time_idx=config.add_relative_time_idx,
             
             training_dataset_parameters=training_dataset_parameters            
         )
